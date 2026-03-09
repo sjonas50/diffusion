@@ -23,6 +23,9 @@ class PretrainScriptArgs:
         default="linear", metadata={"help": "linear | cosine | loglinear"}
     )
     block_size: int = field(default=512, metadata={"help": "Token block size for pretraining."})
+    dtype: str = field(
+        default="bfloat16", metadata={"help": "Model weight dtype: float32 | bfloat16 | float16."}
+    )
     # Dataset args
     dataset_name: str = field(
         default="", metadata={"help": "HuggingFace dataset name (e.g. ashraq/financial-news-articles)."}  # noqa: E501
@@ -105,6 +108,7 @@ def main() -> None:
     model_config = ModelConfig(
         model_name_or_path=script_args.model_name_or_path,
         init_from_pretrained=True,
+        dtype=script_args.dtype,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path)
