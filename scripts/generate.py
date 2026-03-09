@@ -74,9 +74,13 @@ def main() -> None:
     from diffusion_lm.models.backbone import BidirectionalTransformer, add_mask_token
     from diffusion_lm.models.masked_diffusion_lm import MaskedDiffusionLM
 
-    model_config = ModelConfig(model_name_or_path=args.model_path)
+    # Use tokenizer_path as the architecture source (base model).
+    # model_path may be a local checkpoint dir without config.json — in that case
+    # we build the architecture from tok_path, add [MASK], then load the checkpoint weights.
+    arch_path = tok_path  # always use the base model for architecture
+    model_config = ModelConfig(model_name_or_path=arch_path)
 
-    # Build backbone first; add mask token (resizes embeddings); then build full model
+    # Build backbone, add mask token (resizes embeddings), build full model
     backbone = BidirectionalTransformer(model_config)
     if tokenizer.mask_token_id is None:
         mask_token_id = add_mask_token(backbone, tokenizer)
@@ -85,8 +89,33 @@ def main() -> None:
 
     diffusion_config = DiffusionConfig(mask_token_id=mask_token_id)
     model = MaskedDiffusionLM(model_config, diffusion_config)
-    # Replace the auto-constructed backbone with the already-resized one
     model.backbone = backbone
+
+    # Load fine-tuned weights from checkpoint if model_path differs from base model
+    if args.model_path != arch_path:
+        import os
+        ckpt_file = os.path.join(args.model_path, "model.safetensors")
+        if not os.path.exists(ckpt_file):
+            # Try pytorch_model.bin fallback
+            ckpt_file = os.path.join(args.model_path, "pytorch_model.bin")
+        if os.path.exists(ckpt_file):
+            from loguru import logger
+            logger.info(f"Loading checkpoint weights from {ckpt_file}")
+            if ckpt_file.endswith(".safetensors"):
+                from safetensors.torch import load_file
+                state_dict = load_file(ckpt_file, device=str(device))
+            else:
+                state_dict = torch.load(ckpt_file, map_location=device)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                logger.warning(f"Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+            if unexpected:
+                n = len(unexpected)
+                logger.warning(f"Unexpected keys ({n}): {unexpected[:5]}{'...' if n > 5 else ''}")
+        else:
+            from loguru import logger
+            logger.warning(f"No checkpoint weights found in {args.model_path}, using base weights")
+
     model.eval()
     model.to(device)
 
