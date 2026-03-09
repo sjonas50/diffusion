@@ -1,0 +1,7 @@
+# ~0.5B parameters — Qwen2.5 family (same arch as Dream-v0, Tiny-A2D validated path)
+# Default for development; no HF token required, Apache 2.0 license
+model_name_or_path: Qwen/Qwen2.5-0.5B
+init_from_pretrained: true
+attn_implementation: eager   # use flash_attention_2 on GPU
+dtype: float32               # use bfloat16 on GPU
+use_lora: false

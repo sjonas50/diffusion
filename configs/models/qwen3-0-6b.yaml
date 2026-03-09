@@ -1,0 +1,8 @@
+# ~0.6B parameters — Qwen3 family; pre-trained diffusion checkpoint available at
+# dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1 for direct benchmark comparison
+# Requires transformers>=4.51.0
+model_name_or_path: Qwen/Qwen3-0.6B
+init_from_pretrained: true
+attn_implementation: eager   # use flash_attention_2 on GPU
+dtype: float32               # use bfloat16 on GPU
+use_lora: false
