@@ -1,0 +1,23 @@
+{
+  "id": "bba26bf8d15b47d5932a72713046b649",
+  "version": 1,
+  "created_at": "2026-03-09T02:10:46.639Z",
+  "finished_at": "2026-03-09T03:07:11.261Z",
+  "agent": {
+    "name": "claude-code",
+    "model": "claude-sonnet-4-6"
+  },
+  "git_commits": [
+    "af93bb5b1642884f1a7cbec790f8a7220057b908"
+  ],
+  "token_usage": {
+    "input_tokens": 316,
+    "output_tokens": 110802,
+    "cache_read_tokens": 23250064,
+    "cache_write_tokens": 580634,
+    "total_tokens": 23941816
+  },
+  "summary": "Built a complete diffusion language model training framework from scratch, including configuration system, noise schedules, three diffusion variants (masked, block, continuous), bidirectional transformer backbone, five trainer types (pretraining, SFT, DPO, GRPO), five sampling strategies, and end-to-end data pipeline with working pretrain and generate scripts.",
+  "capture_mode": "import",
+  "source_hash": "c8d40b6e779271695814cbe7a32729deabbcda4b52b60bcd244fd55a77f1d0a1"
+}
