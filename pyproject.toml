@@ -44,6 +44,7 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 ignore = [
     "N803",  # argument name should be lowercase (common in ML: B, L, V, T)
     "N806",  # variable in function should be lowercase (B, L, V, T)
+    "N812",  # torch.nn.functional as F is universal PyTorch convention
     "SIM108", # ternary operator (sometimes less readable in ML code)
 ]
 
