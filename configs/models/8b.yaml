@@ -1,0 +1,8 @@
+# ~8B parameters — LLaMA-3 scale, primary AR-to-dLLM adaptation target
+model_name_or_path: meta-llama/Meta-Llama-3-8B
+init_from_pretrained: true
+attn_implementation: flash_attention_2
+dtype: bfloat16
+use_lora: false
+lora_rank: 16
+lora_alpha: 32.0

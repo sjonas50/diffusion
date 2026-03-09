@@ -1,0 +1,4 @@
+process_type: continuous
+schedule_type: cosine
+time_epsilon: 0.001
+block_size: null

@@ -1,0 +1,6 @@
+# ~125M parameters (GPT-2 scale) — for smoke tests and rapid iteration
+model_name_or_path: gpt2
+init_from_pretrained: true
+attn_implementation: eager  # use flash_attention_2 on GPU
+dtype: float32              # use bfloat16 on GPU
+use_lora: false

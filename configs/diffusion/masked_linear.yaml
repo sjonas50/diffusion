@@ -1,0 +1,4 @@
+process_type: masked
+schedule_type: linear
+time_epsilon: 0.001
+block_size: null

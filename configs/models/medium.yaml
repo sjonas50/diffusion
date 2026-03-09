@@ -1,0 +1,6 @@
+# ~350M parameters
+model_name_or_path: gpt2-medium
+init_from_pretrained: true
+attn_implementation: flash_attention_2
+dtype: bfloat16
+use_lora: false

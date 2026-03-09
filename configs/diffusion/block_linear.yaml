@@ -1,0 +1,5 @@
+# BD3LM block diffusion (arXiv:2503.09573) — AR over blocks, masked within
+process_type: block
+schedule_type: linear
+time_epsilon: 0.001
+block_size: 64
