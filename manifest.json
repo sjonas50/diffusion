@@ -1,0 +1,23 @@
+{
+  "id": "0648b7090daf4888abab5126f853e41e",
+  "version": 1,
+  "created_at": "2026-03-09T02:10:46.639Z",
+  "finished_at": "2026-03-09T02:43:04.311Z",
+  "agent": {
+    "name": "claude-code",
+    "model": "claude-sonnet-4-6"
+  },
+  "git_commits": [
+    "278437abd78d4acb91faac7b3ba13656c7f51f47"
+  ],
+  "token_usage": {
+    "input_tokens": 162,
+    "output_tokens": 58912,
+    "cache_read_tokens": 10044210,
+    "cache_write_tokens": 409057,
+    "total_tokens": 10512341
+  },
+  "summary": "The user initialized a GitHub repository and then conducted an extensive multi-phase development session: researching the latest diffusion LLM techniques (Mercury 2, BD3LM, DPO/GRPO), planning the architecture with updated findings, and building the initial project scaffold with configurations, noise schedules, and diffusion process implementations.",
+  "capture_mode": "import",
+  "source_hash": "e3775eed815334f50e71722bf83fe7d6d7af0cd0e772150f6a16e691bf808f5d"
+}
