@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import torch
 from loguru import logger
 from transformers import Trainer, TrainerCallback, TrainerControl, TrainerState
 
@@ -60,6 +61,36 @@ class DiffusionTrainer(Trainer):
         callbacks = kwargs.pop("callbacks", []) or []
         callbacks = list(callbacks) + [NanLossCallback()]
         super().__init__(*args, callbacks=callbacks, **kwargs)
+
+    def _save(self, output_dir: str | None = None, state_dict=None) -> None:
+        """Save model, breaking tied weights for safetensors compatibility.
+
+        GPT-2, Qwen, and LLaMA share embed_tokens.weight with lm_head.weight.
+        safetensors rejects shared tensors. We temporarily detach lm_head to
+        produce an independent copy for saving, then restore the tie.
+        """
+        lm_head = None
+        old_weight = None
+
+        # Detect tied lm_head inside our backbone wrapper
+        try:
+            transformer = self.model.backbone.transformer
+            lm_head = getattr(transformer, "lm_head", None)
+            if lm_head is not None:
+                embed = transformer.get_input_embeddings()
+                if lm_head.weight.data_ptr() == embed.weight.data_ptr():
+                    old_weight = lm_head.weight
+                    lm_head.weight = torch.nn.Parameter(old_weight.detach().clone())
+                    logger.debug("Temporarily broke lm_head/embed_tokens weight tie for saving")
+        except AttributeError:
+            pass
+
+        try:
+            super()._save(output_dir, state_dict)
+        finally:
+            # Restore the tie regardless of success/failure
+            if lm_head is not None and old_weight is not None:
+                lm_head.weight = old_weight
 
     def compute_loss(
         self,
