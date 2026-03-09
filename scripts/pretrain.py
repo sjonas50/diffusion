@@ -7,10 +7,8 @@ from dataclasses import dataclass, field
 
 from transformers import HfArgumentParser
 
-from diffusion_lm.config.diffusion import DiffusionConfig
 from diffusion_lm.config.model import ModelConfig
 from diffusion_lm.config.training import DiffusionTrainingArguments
-from diffusion_lm.models.masked_diffusion_lm import MaskedDiffusionLM
 from diffusion_lm.trainers.base import DiffusionTrainer
 
 
@@ -42,6 +40,7 @@ def main() -> None:
     )
 
     from diffusion_lm.config.diffusion import DiffusionConfig
+    from diffusion_lm.models.masked_diffusion_lm import MaskedDiffusionLM
 
     diffusion_config = DiffusionConfig(
         process_type=script_args.process_type,

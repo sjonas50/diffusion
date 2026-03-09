@@ -1,0 +1,45 @@
+services:
+  train:
+    build: .
+    image: diffusion-lm:latest
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./data:/app/data
+      - ./.cache:/app/.cache
+    env_file:
+      - .env
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      python scripts/pretrain.py
+        --model_name_or_path gpt2
+        --process_type masked
+        --schedule_type linear
+        --output_dir /app/checkpoints/pretrain
+        --per_device_train_batch_size 4
+        --gradient_accumulation_steps 8
+        --max_steps 100000
+        --learning_rate 3e-4
+        --warmup_steps 1000
+        --logging_steps 100
+        --save_steps 1000
+
+  generate:
+    build: .
+    image: diffusion-lm:latest
+    volumes:
+      - ./checkpoints:/app/checkpoints
+    env_file:
+      - .env
+    command: >
+      python scripts/generate.py
+        --model_path /app/checkpoints/pretrain
+        --prompt "The quick brown fox"
+        --max_new_tokens 128
+        --sampler first_hitting
+        --num_steps 64
