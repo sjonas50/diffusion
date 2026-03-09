@@ -16,6 +16,19 @@ Wraps any HuggingFace causal LM backbone with bidirectional attention and adds a
 - **Explicit 4D attention mask** — compatible with Transformers 5.10+, `torch.compile`-safe
 - **HuggingFace Trainer extension** — inherits distributed training (DDP/FSDP/DeepSpeed), checkpointing, W&B logging
 
+## Validated Models
+
+The framework has been tested with the following backbones:
+
+| Model | Params | Notes |
+|-------|--------|-------|
+| `Qwen/Qwen3-0.6B` | 0.6B | Recommended default. Pre-trained diffusion checkpoint available at `dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1` for benchmarking. Requires `transformers>=4.51`. |
+| `Qwen/Qwen2.5-0.5B` | 0.5B | Same family as Dream-v0 and Tiny-A2D (validated diffusion paths). Apache 2.0. |
+| `meta-llama/Llama-3.2-1B` | 1B | Same family as DiffuLLaMA (ICLR 2025). GQA works correctly with 4D mask. Requires HF token. |
+| `gpt2` | 124M | Fastest for smoke tests. Pre-validated via DiffuGPT (ICLR 2025). |
+
+**Avoid** Mistral and Phi-3-mini — both use sliding window attention that operates below the 4D mask injection level.
+
 ## Installation
 
 ```bash
@@ -24,7 +37,7 @@ cd diffusion
 uv sync
 ```
 
-Requires Python 3.11+. For Flash Attention 2 (recommended for training):
+Requires Python 3.11+. For Flash Attention 2 (recommended for GPU training):
 
 ```bash
 pip install flash-attn --no-build-isolation
@@ -34,11 +47,11 @@ pip install flash-attn --no-build-isolation
 
 ### 1. Pretrain / AR-to-dLLM adaptation
 
-Fine-tune a GPT-2 checkpoint with the masked diffusion objective:
+Fine-tune Qwen3-0.6B on financial news with the masked diffusion objective:
 
 ```bash
 uv run python scripts/pretrain.py \
-  --model_name_or_path gpt2 \
+  --model_name_or_path Qwen/Qwen3-0.6B \
   --process_type masked \
   --schedule_type linear \
   --max_steps 100000 \
@@ -73,7 +86,7 @@ uv run python scripts/grpo.py \
 ```bash
 uv run python scripts/generate.py \
   --model_path ./checkpoints/grpo \
-  --prompt "The meaning of life is" \
+  --prompt "The Federal Reserve announced" \
   --sampler first_hitting \
   --num_steps 64 \
   --max_new_tokens 128
@@ -91,6 +104,36 @@ uv run python scripts/evaluate.py \
   --dataset_config wikitext-2-raw-v1 \
   --split test
 ```
+
+## Finance Domain Example
+
+The framework has been tested end-to-end on `ashraq/financial-news-articles` (306k Reuters/Bloomberg articles) with Qwen3-0.6B:
+
+```python
+from datasets import load_dataset
+from transformers import AutoTokenizer
+from diffusion_lm.data.pretraining import tokenize_and_group
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+raw_ds = load_dataset("ashraq/financial-news-articles", split="train")
+chunks = list(tokenize_and_group(raw_ds, tokenizer, block_size=512, text_column="text"))
+```
+
+Other recommended finance datasets:
+- `PleIAs/SEC` — 373k SEC 10-K annual reports, CC0 license (use streaming for full dataset)
+- `sujet-ai/Sujet-Finance-Instruct-177k` — 177k QA pairs for SFT, Apache 2.0
+
+## Testing
+
+```bash
+# Fast unit tests (54 tests, ~4s)
+uv run pytest tests/ -m "not slow"
+
+# Integration tests against real model weights (downloads ~1-2GB per model)
+uv run pytest tests/test_model_compat.py -v -m slow
+```
+
+The integration tests verify bidirectionality, forward pass sanity, generation, and mask token handling for each supported model.
 
 ## Docker
 
@@ -118,8 +161,8 @@ src/diffusion_lm/
 ├── samplers/        # FirstHittingSampler, BlockSampler, ContinuousSampler, CachedSampler
 └── evaluation/      # ELBOPerplexity, DiffusionLMEvalAdapter
 scripts/             # pretrain.py, sft.py, dpo.py, grpo.py, generate.py, evaluate.py
-configs/             # YAML configs for models, diffusion processes, training runs
-tests/               # 54 tests across schedules, diffusion, models, trainers, samplers
+configs/models/      # qwen3-0-6b.yaml, qwen2-5-0-5b.yaml, llama-3-2-1b.yaml, small.yaml, ...
+tests/               # 54 unit tests + 12 slow integration tests across all supported models
 ```
 
 ## Key Design Decisions
@@ -132,6 +175,8 @@ tests/               # 54 tests across schedules, diffusion, models, trainers, s
 
 **First-Hitting Sampler as default** — standard categorical sampling exploits a mathematical inaccuracy that inflates benchmarks. The First-Hitting Sampler is theoretically correct and ~20x faster.
 
+**Tied weight handling** — GPT-2, Qwen, and LLaMA all share `embed_tokens.weight` with `lm_head.weight`. `DiffusionTrainer._save()` temporarily breaks this tie before writing safetensors checkpoints and restores it immediately after.
+
 ## References
 
 - [LLaDA](https://arxiv.org/abs/2502.09992) — Large Language Diffusion with mAsking
@@ -140,3 +185,4 @@ tests/               # 54 tests across schedules, diffusion, models, trainers, s
 - [diffu-GRPO](https://arxiv.org/abs/2504.12216) — First RL pipeline for dLLMs
 - [First-Hitting Sampler](https://arxiv.org/abs/2409.02908) — Correct and fast sampling
 - [MDLM](https://arxiv.org/abs/2406.07524) — Masked Diffusion Language Models (NeurIPS 2024)
+- [DiffuLLaMA](https://arxiv.org/abs/2410.17891) — LLaMA-family AR-to-dLLM adaptation (ICLR 2025)
