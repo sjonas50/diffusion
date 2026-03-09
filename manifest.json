@@ -1,0 +1,23 @@
+{
+  "id": "7daca3092d2e4d6da34611bcd5f007f0",
+  "version": 1,
+  "created_at": "2026-03-09T02:10:46.639Z",
+  "finished_at": "2026-03-09T04:17:02.306Z",
+  "agent": {
+    "name": "claude-code",
+    "model": "claude-sonnet-4-6"
+  },
+  "git_commits": [
+    "7f6631f6e6c466944f232193de357bbacc024490"
+  ],
+  "token_usage": {
+    "input_tokens": 501,
+    "output_tokens": 151367,
+    "cache_read_tokens": 40616866,
+    "cache_write_tokens": 696578,
+    "total_tokens": 41465312
+  },
+  "summary": "i created a new empty github repo for this project: git@github.com:sjonas50/diffusion.git",
+  "capture_mode": "import",
+  "source_hash": "6262d91fc68953999f51d869db32207c123d3946b4228a027b56734c92214f18"
+}
