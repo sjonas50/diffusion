@@ -24,12 +24,10 @@ class DiffusionGRPOTrainer(DiffusionTrainer):
     1. Sample K=group_size completions using FirstHittingSampler.
     2. Score each completion with reward_fn.
     3. Compute group-relative advantage: A_k = (r_k - mean(r)) / (std(r) + eps).
-    4. Estimate log p(completion | prompt) via ELBO Monte Carlo.
-    5. GRPO clipped objective: E[clip(ratio, 1-eps, 1+eps) * A_k].
+    4. Weight the diffusion loss by advantage for policy gradient.
 
     Args:
         reward_fn: Callable(prompt_ids, completion_ids) -> Tensor of shape (B,).
-            Must return scalar reward per (prompt, completion) pair.
         group_size: Completions sampled per prompt (K).
         clip_ratio: PPO-style clip ratio epsilon.
         n_mc_samples: Monte Carlo samples for ELBO estimation.
@@ -52,39 +50,6 @@ class DiffusionGRPOTrainer(DiffusionTrainer):
         self.n_mc_samples = n_mc_samples
         self.ref_model = ref_model
 
-    def _estimate_log_prob(
-        self,
-        model,
-        input_ids: Tensor,
-        prompt_mask: Tensor | None,
-        shared_u: float,
-    ) -> Tensor:
-        """Estimate log p(response | prompt) via ELBO MC averaging.
-
-        Args:
-            model: Model to query.
-            input_ids: Token IDs, shape (B, L).
-            prompt_mask: Boolean mask for prompt positions.
-            shared_u: Shared antithetic base (same across policy + reference).
-
-        Returns:
-            Log-prob estimates shape (B,).
-        """
-        B = input_ids.shape[0]
-        device = input_ids.device
-        total_loss = torch.zeros(B, device=device)
-
-        for _ in range(self.n_mc_samples):
-            indices = torch.arange(B, device=device, dtype=torch.float32)
-            t = ((shared_u + indices / B) % 1.0).float()
-            t = t * (1.0 - 1e-3) + 1e-3
-
-            with torch.no_grad() if model is self.ref_model else torch.enable_grad():
-                outputs = model(input_ids=input_ids, prompt_mask=prompt_mask)
-            total_loss = total_loss + outputs["loss"].detach()
-
-        return -(total_loss / self.n_mc_samples)
-
     def compute_loss(
         self,
         model,
@@ -105,14 +70,13 @@ class DiffusionGRPOTrainer(DiffusionTrainer):
         B, prompt_len = prompt_ids.shape
         device = prompt_ids.device
 
-        # Import here to avoid circular imports at module load time
         from diffusion_lm.config.generation import GenerationConfig
         from diffusion_lm.samplers.first_hitting_sampler import FirstHittingSampler
 
         gen_config = GenerationConfig(max_new_tokens=64, num_steps=32)
         sampler = FirstHittingSampler()
 
-        # Sample K completions per prompt
+        # Sample K completions per prompt (no gradient for generation)
         all_rewards = []
         all_input_ids = []
         all_prompt_masks = []
@@ -126,25 +90,35 @@ class DiffusionGRPOTrainer(DiffusionTrainer):
             all_rewards.append(rewards)
             all_input_ids.append(completion_ids)
 
-            # Build prompt_mask for full (prompt + completion) sequence
             full_len = completion_ids.shape[1]
             full_prompt_mask = torch.zeros(B, full_len, dtype=torch.bool, device=device)
             full_prompt_mask[:, :prompt_len] = True
             all_prompt_masks.append(full_prompt_mask)
 
-        # Stack: (K, B, L)
         rewards_tensor = torch.stack(all_rewards, dim=0)  # (K, B)
 
-        # Group-relative advantage: normalize within each prompt's group
-        mean_r = rewards_tensor.mean(dim=0, keepdim=True)  # (1, B)
+        # Group-relative advantage
+        mean_r = rewards_tensor.mean(dim=0, keepdim=True)
         std_r = rewards_tensor.std(dim=0, keepdim=True).clamp(min=1e-8)
         advantages = (rewards_tensor - mean_r) / std_r  # (K, B)
 
-        # Compute GRPO loss
+        # Compute GRPO loss: advantage-weighted diffusion loss WITH gradient
+        # Use shared antithetic timesteps across completions for variance reduction
+        shared_u = torch.rand(1).item()
         total_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
         for k in range(self.group_size):
-            outputs = model(input_ids=all_input_ids[k], prompt_mask=all_prompt_masks[k])
+            # Build shared antithetic timesteps
+            indices = torch.arange(B, device=device, dtype=torch.float32)
+            t = ((shared_u + indices / B) % 1.0).float()
+            t = t * (1.0 - 1e-3) + 1e-3
+
+            # Forward pass WITH gradient, using explicit shared timesteps
+            outputs = model(
+                input_ids=all_input_ids[k],
+                prompt_mask=all_prompt_masks[k],
+                t=t,
+            )
             policy_loss = outputs["loss"]
 
             adv = advantages[k].detach()  # (B,)

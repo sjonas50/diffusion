@@ -71,17 +71,46 @@ class MaskedDiffusionLM(nn.Module):
     ) -> MaskedDiffusionLM:
         """Create model and optionally add mask token.
 
-        If tokenizer is provided and mask_token_id is -1, adds [MASK] token
-        and updates diffusion_config.mask_token_id automatically.
+        If tokenizer is provided and mask_token_id is -1, adds [MASK] token,
+        resizes the backbone embeddings, and reuses it (no double init).
         """
+        resized_backbone = None
         if tokenizer is not None and diffusion_config.mask_token_id == -1:
-            # Need a temporary backbone to resize embeddings
-            backbone = BidirectionalTransformer(model_config)
-            mask_token_id = add_mask_token(backbone, tokenizer)
+            resized_backbone = BidirectionalTransformer(model_config)
+            mask_token_id = add_mask_token(resized_backbone, tokenizer)
             diffusion_config.mask_token_id = mask_token_id
-            # Now create the full model (backbone will be re-initialized)
-            # TODO: avoid double initialization in a future refactor
-        return cls(model_config, diffusion_config)
+
+        model = cls(model_config, diffusion_config)
+        if resized_backbone is not None:
+            model.backbone = resized_backbone
+        return model
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None) -> None:
+        """Enable gradient checkpointing on the inner HF transformer."""
+        self.backbone.transformer.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing on the inner HF transformer."""
+        self.backbone.transformer.gradient_checkpointing_disable()
+
+    def get_logits(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Inference-only forward pass: returns logits without corruption or loss.
+
+        Use this in samplers during generation. Does NOT apply the forward
+        diffusion process — takes input_ids as-is and returns logits.
+
+        Args:
+            input_ids: Token IDs (possibly partially masked), shape (B, L).
+            attention_mask: Optional padding/4D mask, shape (B, L) or (B, 1, L, L).
+
+        Returns:
+            Logits, shape (B, L, V).
+        """
+        return self.backbone(input_ids, attention_mask)
 
     def forward(
         self,
@@ -89,6 +118,7 @@ class MaskedDiffusionLM(nn.Module):
         attention_mask: Tensor | None = None,
         labels: Tensor | None = None,
         prompt_mask: Tensor | None = None,
+        t: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Training forward pass.
 
@@ -99,6 +129,8 @@ class MaskedDiffusionLM(nn.Module):
             prompt_mask: Optional boolean mask, shape (B, L).
                 True = prompt position (never masked, excluded from loss).
                 None = standard pretraining (all positions participate).
+            t: Optional explicit timesteps, shape (B,). If None, sampled via
+                antithetic sampling. Pass explicitly for DPO/GRPO shared timesteps.
 
         Returns:
             Dict with "loss" (scalar) and "logits" (B, L, V).
@@ -106,8 +138,9 @@ class MaskedDiffusionLM(nn.Module):
         B = input_ids.shape[0]
         device = input_ids.device
 
-        # Sample timesteps (antithetic stratified sampling)
-        t = self.diffusion.sample_timesteps(B, device)
+        # Sample timesteps (antithetic stratified sampling) or use provided
+        if t is None:
+            t = self.diffusion.sample_timesteps(B, device)
 
         # Forward corruption
         corrupted, _ = self.diffusion.forward_process(input_ids, t)

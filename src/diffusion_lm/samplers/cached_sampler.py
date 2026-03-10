@@ -23,9 +23,6 @@ class CachedSampler(FirstHittingSampler):
     and the model does not re-compute it until any other position changes
     and invalidates the cache.
 
-    Lower priority optimization: FirstHittingSampler already provides 20x
-    speedup over naive categorical sampling.
-
     Args:
         stability_threshold: Steps a position must predict the same token
             before being cached (default: 3).
@@ -62,9 +59,6 @@ class CachedSampler(FirstHittingSampler):
             dim=1,
         )
 
-        prompt_mask = torch.zeros(B, prompt_len + gen_len, dtype=torch.bool, device=device)
-        prompt_mask[:, :prompt_len] = True
-
         # Cache tracking
         prev_predictions = torch.full((B, gen_len), -1, dtype=torch.long, device=device)
         stability_count = torch.zeros(B, gen_len, dtype=torch.long, device=device)
@@ -72,10 +66,7 @@ class CachedSampler(FirstHittingSampler):
 
         num_steps = config.num_steps
 
-        for step in range(num_steps):
-            t_val = 1.0 - step / max(num_steps - 1, 1)
-            t_val = max(t_val, model.diffusion.time_epsilon)
-
+        for _step in range(num_steps):
             # Which positions need forward pass? Non-cached + masked
             needs_update = ~cached | (x[:, prompt_len:] == mask_token_id)
 
@@ -83,9 +74,11 @@ class CachedSampler(FirstHittingSampler):
                 break
 
             with torch.no_grad():
-                outputs = model(input_ids=x, prompt_mask=prompt_mask)
+                logits = model.get_logits(x)[:, prompt_len:, :]
 
-            logits = outputs["logits"][:, prompt_len:, :]
+            # Exclude mask token from predictions
+            logits[:, :, mask_token_id] = -float("inf")
+
             probs = torch.softmax(logits / max(config.temperature, 1e-6), dim=-1)
             confidence, predicted_ids = probs.max(dim=-1)
 
@@ -107,8 +100,9 @@ class CachedSampler(FirstHittingSampler):
             scores[~is_masked] = -float("inf")
 
             if is_masked.any():
-                k = min(n_to_reveal, is_masked.sum(dim=1).min().item())
-                if k > 0:
+                n_masked_min = is_masked.sum(dim=1).min().item()
+                if n_masked_min > 0:
+                    k = min(n_to_reveal, n_masked_min)
                     _, top_indices = scores.topk(k, dim=1)
                     for b in range(B):
                         for idx in top_indices[b]:
@@ -123,8 +117,8 @@ class CachedSampler(FirstHittingSampler):
         final_is_masked = x[:, prompt_len:] == mask_token_id
         if final_is_masked.any():
             with torch.no_grad():
-                outputs = model(input_ids=x, prompt_mask=prompt_mask)
-            final_logits = outputs["logits"][:, prompt_len:, :]
+                final_logits = model.get_logits(x)[:, prompt_len:, :]
+            final_logits[:, :, mask_token_id] = -float("inf")
             _, fill_ids = final_logits.max(dim=-1)
             x[:, prompt_len:][final_is_masked] = fill_ids[final_is_masked]
 

@@ -145,7 +145,7 @@ def test_loss_decreases(tiny_masked_lm, simple_batch):
     optimizer = AdamW(tiny_masked_lm.parameters(), lr=5e-3)
 
     losses = []
-    for _ in range(20):
+    for _ in range(40):
         outputs = tiny_masked_lm(**simple_batch)
         loss = outputs["loss"]
         loss.backward()
@@ -153,11 +153,12 @@ def test_loss_decreases(tiny_masked_lm, simple_batch):
         optimizer.zero_grad()
         losses.append(loss.item())
 
-    first_avg = sum(losses[:5]) / 5
-    last_avg = sum(losses[-5:]) / 5
+    first_avg = sum(losses[:10]) / 10
+    last_avg = sum(losses[-10:]) / 10
     assert last_avg < first_avg, (
-        f"Loss did not decrease on average: first_5_avg={first_avg:.4f}, last_5_avg={last_avg:.4f}. "
-        f"Full losses: {[f'{l:.2f}' for l in losses]}"
+        f"Loss did not decrease on average: first_10_avg={first_avg:.4f}, "
+        f"last_10_avg={last_avg:.4f}. "
+        f"Full losses: {[f'{v:.2f}' for v in losses]}"
     )
 
 

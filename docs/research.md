@@ -1,166 +1,189 @@
-# Diffusion LLM Research — March 2026
+# Research: Memory-Efficient Training on Apple Silicon (MPS Backend)
 
 ## Executive Summary
 
-Diffusion LLMs have matured significantly since mid-2025. Mercury 2 (Feb 24, 2026) confirms the approach works commercially at 727–1196 tok/s with quality competitive with Claude 4.5 Haiku. The dominant training paradigm has shifted from **training from scratch** to **AR-to-dLLM adaptation** — starting from a pretrained autoregressive checkpoint requires ~500x less compute. Four new techniques materially improve on the original LLaDA plan: First-Hitting Sampler (20x faster inference, drop-in), Block Diffusion/BD3LM (KV cache + 13% perplexity gain, ICLR 2025 Oral), diffu-GRPO (first working RL pipeline), and CDLM distillation (14x post-training speedup). The HuggingFace `_update_causal_mask` monkey-patch approach is **deprecated and being removed in v5.10** — must be replaced with explicit 4D attention mask injection.
-
----
+Training a ~600M parameter model (Qwen3-0.6B) on Apple Silicon is feasible but requires careful configuration. **bitsandbytes 8-bit Adam does NOT work on MPS** — use Adafactor or AdamW with gradient checkpointing instead. bf16 autocast works on MPS starting PyTorch >=2.6 with macOS >=14. On 18GB unified memory, expect batch size 1-2 with seq_len 512 and gradient checkpointing; 36GB allows batch size 4-8. torch.compile provides no meaningful benefit on MPS — skip it. The most impactful optimizations are: (1) gradient checkpointing, (2) Adafactor instead of AdamW, (3) fp16 or bf16 mixed precision, (4) aggressive gradient accumulation.
 
 ## Problem Statement
 
-Build a training framework for diffusion-based LLMs supporting masked diffusion (LLaDA/Mercury style) and continuous embedding diffusion. Target: full pipeline from AR-adapted pretraining through SFT, DPO/RL, and generation with state-of-the-art inference speedups.
+We need to train/fine-tune a ~600M parameter diffusion LM on Apple Silicon Macs (M-series, 18-36GB unified memory) using PyTorch's MPS backend and HuggingFace Trainer. The key constraints are limited memory (shared between CPU and GPU), immature MPS backend, and missing CUDA-specific optimizations.
 
----
+## Technology Evaluation
 
-## Technology Evaluation — Frameworks
+### 1. Memory-Efficient Optimizers on MPS
 
-| Rank | Framework | Stars | Status | Use For |
-|------|-----------|-------|--------|---------|
-| 1 | [ZHZisZZ/dllm](https://github.com/ZHZisZZ/dllm) | 2.1k | Active Feb 2026, paper arXiv:2602.22661 | **Primary reference — unified training** |
-| 2 | [kuleshov-group/bd3lms](https://github.com/kuleshov-group/bd3lms) | ~800 | ICLR 2025 Oral | Block diffusion, KV cache, noise schedules |
-| 3 | [ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA) | ~3k | Active, LLaDA-1.5 + LLaDA-V released | Reference for SFT + fine-tuning patterns |
-| 4 | [NVlabs/Fast-dLLM](https://github.com/NVlabs/Fast-dLLM) | N/A | Oct 2025, ICLR 2026 | Inference acceleration — **verify NVIDIA Research license before use** |
-| 5 | [dllm-reasoning/d1](https://github.com/dllm-reasoning/d1) | N/A | Apr 2025, arXiv:2504.12216 | diffu-GRPO RL fine-tuning |
+#### Adafactor — Recommended
+- **Status:** Fully works on MPS. Pure PyTorch, no custom kernels.
+- **Memory savings:** ~33% less optimizer state than AdamW (factored second moments instead of per-parameter).
+- **HF Trainer flag:** `--optim adafactor`
+- **Gotcha:** Set `scale_parameter=False` and provide explicit LR when using with Trainer. Default Adafactor uses relative step sizing which can conflict with HF schedulers.
 
----
+#### AdamW (torch) — Recommended (baseline)
+- **Status:** Fully works on MPS.
+- **HF Trainer flag:** `--optim adamw_torch`
+- **Memory:** Full optimizer state (2x model params). For 600M model: ~4.8GB optimizer state in fp32.
 
-## Mercury 2 — Verified Facts (Feb 24, 2026)
+#### Schedule-Free AdamW — Consider
+- **Status:** Pure Python/PyTorch, should work on MPS. Requires `pip install schedulefree`.
+- **HF Trainer flag:** `--optim schedule_free_adamw` (with `--lr_scheduler_type constant`)
+- **Benefit:** Eliminates LR scheduler tuning. Competitive with tuned cosine schedules.
 
-- **Speed:** 727 tok/s (Artificial Analysis measured), peak 1,196 tok/s on Blackwell — 13x faster than Claude 4.5 Haiku, 17x faster than GPT-5 Mini
-- **TTFT caveat:** 3.48s first-token latency (2x median peers) — all diffusion steps must complete before first token streams
-- **Quality:** AIME 2025: 91.1 | GPQA Diamond: 73.6 | LiveCodeBench: 67.3 | AI Intelligence Index: 33/134
-- **Tier:** Claude 4.5 Haiku / GPT-5 Mini quality range. Co-founder confirmed: not GPT-4o class.
-- **Context:** 128K tokens, OpenAI-compatible API
-- **Pricing:** $0.25/M input, $0.75/M output. Note: generates 3.5x more output tokens than peers — real cost is higher than headline rate suggests.
-- **Architecture:** Discrete masked diffusion. Speed comes from custom CUDA kernels for parallel inference + Blackwell hardware, not architectural novelty.
-- **Weights:** Closed, proprietary, API-only.
+#### bitsandbytes 8-bit Adam — Avoid on MPS
+- **Status:** Does NOT work on MPS as of bitsandbytes 0.45.x. CUDA-only for quantized optimizers. Apple Silicon support is listed as "experimental/alpha" but quantized optimizer kernels are not implemented for Metal.
+- **HF Trainer flag:** `--optim adamw_bnb_8bit` (will crash on MPS)
+- **Alternative:** The `mps-bitsandbytes` fork on PyPI offers NF4/INT8 quantization for inference but NOT optimizer quantization for training.
 
----
+#### Lion — Consider (manual integration)
+- **Status:** Pure PyTorch implementation available (`lion-pytorch` package). Works on MPS since it only uses sign operations.
+- **HF Trainer flag:** Not built-in. Requires custom optimizer injection via `Trainer.__init__(optimizers=(lion_opt, scheduler))`.
+- **Memory:** Same as SGD (only momentum, no second moments). ~50% less than AdamW.
+- **Gotcha:** Requires 3-10x lower LR than AdamW. Sensitive to weight decay.
 
-## New Models Since June 2025
+#### CAME — Avoid
+- **Status:** External package `came-pytorch`. Should work on MPS (pure PyTorch) but poorly maintained, last update 2023.
 
-| Model | Date | Size | Key Innovation |
-|-------|------|------|----------------|
-| LLaDA-V | May 2025 | 8B | Multimodal vision-language (SigLIP2 vision tower) |
-| Dream 7B | Aug 2025 | 7B | AR-to-dLLM init, context-adaptive noise scheduling |
-| MMaDA-8B | Jun 2025 | 8B | Block diffusion + mixed CoT + UniGRPO RL, text+image |
-| LLaDA-1.5 | 2025 | 8B | Updated instruction-tuned checkpoint (open weights, MIT) |
-| Tiny-A2D | Dec 2025 | 0.5–0.6B | SOTA small dLLMs via AR adaptation |
-| LLaDA 2.0-flash | Dec 2025 | 100B MoE | 73.18 avg over 47 benchmarks, ties Qwen3-30B-A3B; weights release TBD |
+#### GaLore — Consider for extreme memory savings
+- **Status:** `--optim galore_adamw`. Projects gradients to low-rank space.
+- **Memory:** Can reduce optimizer memory by 8x with rank=64.
+- **Gotcha:** Adds ~3 min startup overhead for SVD. Single-GPU only for layerwise mode.
 
-**Key paradigm shift:** AR-to-dLLM adaptation is now standard. ~500x less compute vs. training from scratch. Dream 7B and Fast-dLLM v2 both demonstrate this.
+### 2. Gradient Checkpointing on MPS
 
----
+**Status: Works. Use it.**
+- HF Trainer flag: `--gradient_checkpointing true`
+- Memory savings: ~40-60% reduction in activation memory, at ~20-30% training speed cost.
+- **No known MPS-specific issues.** The implementation is backend-agnostic (pure autograd).
+- For a 600M model at seq_len 512, this is the single most impactful memory optimization.
 
-## Architecture Patterns Found
+### 3. Mixed Precision on MPS
 
-### 1. AR-to-dLLM Adaptation (New Standard)
-Start from pretrained AR checkpoint → disable causal mask correctly → fine-tune with masked diffusion objective on ~1B tokens. Fast-dLLM v2 full recipe. Preferred init path.
+#### bf16 — Recommended (PyTorch >=2.6, macOS >=14)
+- `torch.autocast("mps", dtype=torch.bfloat16)` merged in PyTorch via PR #139390 (Nov 2024). Available in PyTorch 2.6+.
+- HF Trainer flag: `--bf16 true`
+- **Requires macOS 14 (Sonoma) or later.** Will raise an error on older macOS.
+- Preferred over fp16: no loss scaling needed, wider dynamic range.
 
-### 2. Block Diffusion — BD3LM (ICLR 2025 Oral, arXiv:2503.09573)
-Autoregressive over blocks, masked diffusion within each block. Unlocks KV caching, arbitrary sequence length. 13% perplexity improvement. MMaDA-8B uses this approach.
+#### fp16 — Consider (with caveats)
+- `torch.autocast("mps", dtype=torch.float16)` available since PyTorch 2.1.
+- HF Trainer flag: `--fp16 true`
+- **Gotcha:** HuggingFace docs previously stated "MPS does not support fp16." This referred to *native* fp16 training, not autocast. Autocast fp16 works but may require `PYTORCH_ENABLE_MPS_FALLBACK=1` for some ops.
+- Risk of overflow/underflow without proper loss scaling.
 
-### 3. First-Hitting Sampler (arXiv:2409.02908, ICLR 2025)
-Proves timestep `t` adds no information to MDM score function (confirms no-timestep-input). Standard categorical sampling exploits a mathematical inaccuracy that inflates benchmarks. First-Hitting Sampler is a **drop-in replacement** with 20x faster inference and theoretically correct samples. Must be default sampler.
+#### fp32 — Fallback
+- Always works. 2x memory cost. Use only if mixed precision causes instability.
 
-### 4. diffu-GRPO / d1 (arXiv:2504.12216)
-First working RL pipeline for dLLMs. Adapts GRPO for parallel token generation. LLaDA-8B + diffu-GRPO matches AR reasoning models on GSM8K/MATH500. Replaces DPO for reasoning tasks.
+### 4. Gradient Accumulation on MPS
 
-### 5. Consistency Distillation — CDLM (arXiv:2511.19269)
-Post-training distillation giving 14x inference speedup. Together AI published full recipe. Optional Phase 6.
+**Works, but with caveats.**
+- HF Trainer flag: `--gradient_accumulation_steps N`
+- **Performance concern:** MPS backward passes are more fragmented than CUDA. Each accumulation step incurs Metal command buffer overhead. Expect ~5-15% overhead per accumulation step vs. theoretical zero-cost.
+- **Bug alert:** PyTorch MPS had a kernel bug where `addcmul_` and `addcdiv_` silently failed on non-contiguous tensors (affects gradient accumulation scenarios). Fixed in PyTorch 2.3+. Pin `torch>=2.3`.
+- **Recommendation:** Use accumulation steps of 4-16. Effective batch size = micro_batch * accumulation_steps.
 
-### 6. Running Confidence Remasking
-Inference-time fix for "Answer Backslide." Free, no retraining. Implement in sampler as default.
+### 5. Practical Memory Budgets
 
----
+Memory breakdown for Qwen3-0.6B (~600M params):
 
-## Key APIs and Dependencies
+| Component | fp32 | bf16/fp16 mixed |
+|-----------|------|-----------------|
+| Model weights | ~2.4 GB | ~1.2 GB |
+| Optimizer state (AdamW) | ~4.8 GB | ~4.8 GB (always fp32) |
+| Optimizer state (Adafactor) | ~3.2 GB | ~3.2 GB |
+| Gradients | ~2.4 GB | ~1.2 GB |
+| Activations (bs=1, seq=512) | ~1-2 GB | ~0.5-1 GB |
+| Activations (bs=1, seq=512, grad ckpt) | ~0.3-0.5 GB | ~0.2-0.3 GB |
+| PyTorch/system overhead | ~1-2 GB | ~1-2 GB |
 
-| Dependency | Status | Risk | Notes |
-|-----------|--------|------|-------|
-| HuggingFace Transformers | Active | **HIGH** | `_update_causal_mask` deprecated, removal in v5.10 |
-| Flash Attention 2 | Active | Medium | Must pass `is_causal=False` explicitly to `flash_attn_func` |
-| `torch.compile` | Active | Medium | Fails with new `masking_utils.create_causal_mask` (issue #42950) |
-| HF datasets streaming | Active | Low | Stable API |
-| lm-evaluation-harness | Active | Low | Interface stable |
-| Fast-dLLM (NVlabs) | Active | **License** | NVIDIA Research license — verify commercial rights before use |
+**18GB Mac (e.g., M3/M4 base):**
+- Usable GPU memory: ~13-14 GB (Metal caps at ~75% by default)
+- Set `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` to use full memory (risk of system instability)
+- **Max config:** bf16 + Adafactor + gradient_checkpointing + batch_size=1 + seq_len=512 + grad_accum=16
+- Effective batch size: 16. Tight but workable.
+- For seq_len=1024: likely OOM. Reduce to batch_size=1 with grad_accum=32.
 
----
+**36GB Mac (e.g., M3/M4 Pro):**
+- Usable GPU memory: ~27-30 GB
+- **Max config:** bf16 + AdamW + gradient_checkpointing + batch_size=4 + seq_len=512 + grad_accum=8
+- Effective batch size: 32. Comfortable.
+- seq_len=1024 feasible with batch_size=2.
 
-## Known Pitfalls and Risks
+### 6. torch.compile on MPS
 
-### CRITICAL: Replace the Causal Mask Monkey-Patch
-`_update_causal_mask` is deprecated and removed in Transformers v5.10. The new `masking_utils.create_causal_mask` path breaks `torch.compile(fullgraph=True)`. The Gemma3 bidirectional mask bug (issue #39389) shows silent causal fallback is a real failure mode — model trains on wrong attention with no crash signal.
+**Status: Avoid for training.**
+- MPS backend lacks a mature compiler/fusion stack. Complex operations fall back to CPU or run as unfused Metal kernels.
+- Most users run eager mode on MPS. No meaningful speedup reported for training workloads.
+- **Risk:** Graph breaks are common in training (backward pass fragmentation, gradient checkpointing recomputation), each triggering recompilation overhead.
+- **Alternative for speed:** MLX framework (Apple's native ML framework) is 2-3x faster than PyTorch MPS for inference, but not compatible with HF Trainer for training.
 
-**Safe path:** Subclass model's `forward()` and inject an explicit all-zeros 4D float mask `(batch, 1, seq_len, seq_len)`. Bypasses all HF internal mask generation. For FA2: pass `is_causal=False` explicitly to `flash_attn_func`.
+### 7. MPS-Specific Bugs and Workarounds
 
-### Training Pitfalls (ranked by severity)
-1. **"Answer Backslide"** — 9.8% of MATH-500 failures had correct intermediate answers overwritten. Mitigate: Running Confidence Remasking (free) or MDPO RL.
-2. **Gradient variance** — Random masking causes 14x higher variance than full-mask. Mitigate: MIRROR (anti-correlated mask pairs) or P-POTS sampler.
-3. **NaN crashes at scale** — LLaDA crashed at 1.2T/2.3T tokens; LR reduction fixed it. Mitigate: clip grad norm to 1.0, checkpoint every 1k steps.
-4. **Cross-sample attention leakage** — Silent quality degradation when packing sequences. Mitigate: per-sample block-diagonal attention masks in collator.
+| Issue | PyTorch Version | Workaround |
+|-------|----------------|------------|
+| `addcmul_`/`addcdiv_` silent failure on non-contiguous tensors | <2.3 | Upgrade to >=2.3 |
+| Missing ops fallback to CPU silently | All | Set `PYTORCH_ENABLE_MPS_FALLBACK=1` |
+| OOM without warning | All | Set `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` |
+| SDPA crashes at seq_len >12K | All | Use `attn_implementation="eager"` for long seqs |
+| MPS sometimes slower than CPU for small models | All | Profile first; MPS overhead dominates for <100M models |
+| Memory leak in LSTM iterations | <2.5 | Not relevant for transformer training |
+| MPS not available on macOS 26 Tahoe (beta) | 2.9.1/2.10 nightly | Known issue, tracked in pytorch/pytorch#167679 |
 
-### Benchmark Inflation Warning
-Standard categorical sampling in masked diffusion exploits a mathematical inaccuracy that inflates benchmark scores vs. autoregressive models. Use First-Hitting Sampler for honest comparisons.
-
----
+**Critical env vars for MPS training:**
+```bash
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0  # or 0.7 for safety
+```
 
 ## Recommended Stack
 
+For Qwen3-0.6B on 18GB Apple Silicon Mac:
+
+```python
+# TrainingArguments
+TrainingArguments(
+    output_dir="./checkpoints",
+    bf16=True,                          # requires macOS >=14, PyTorch >=2.6
+    optim="adafactor",                  # 33% less memory than AdamW
+    gradient_checkpointing=True,        # 40-60% activation memory savings
+    per_device_train_batch_size=1,      # tight on 18GB
+    gradient_accumulation_steps=16,     # effective batch = 16
+    max_grad_norm=1.0,
+    dataloader_pin_memory=False,        # not useful on unified memory
+    # Do NOT set: fp16=True (use bf16), torch_compile=True (no benefit)
+)
 ```
-Core:         PyTorch 2.5+ + HuggingFace Transformers (pin version) + uv
-Diffusion:    Masked diffusion primary, continuous secondary
-Init:         AR-to-dLLM adaptation from pretrained checkpoint (not from scratch)
-Attention:    Explicit 4D float mask injection in forward() — NOT monkey-patch
-Sampler:      First-Hitting Sampler as default (not confidence-based categorical)
-RL:           diffu-GRPO (better than DPO for reasoning tasks)
-Inference:    Running Confidence Remasking (free), CDLM distillation (optional Phase 6)
-Architecture: BD3LM block diffusion variant for KV cache + long sequences
-Training:     HF Trainer extension (still correct — gives DDP/FSDP/DeepSpeed free)
-Config:       HF-style dataclasses + HfArgumentParser
+
+For 36GB Mac, change `per_device_train_batch_size=4` and `gradient_accumulation_steps=8`.
+
+**Minimum pinned versions:**
 ```
-
----
-
-## Required Updates to plan.md
-
-1. **Replace `_update_causal_mask` monkey-patch** → explicit 4D mask injection in `BidirectionalTransformer.forward()`
-2. **Add AR-to-dLLM adaptation** as preferred init path in `ModelConfig`
-3. **Replace masked sampler with First-Hitting Sampler** as default
-4. **Add Running Confidence Remasking** option to sampler
-5. **Add diffu-GRPO trainer** alongside/replacing DPO trainer
-6. **Add Block Diffusion (BD3LM)** variant in `diffusion/` module
-7. **Update Mercury 2 facts**: 727–1196 tok/s, TTFT 3.48s, AIME 91.1, Feb 2026
-8. **Pin Transformers version** in pyproject.toml
-9. **Add cross-sample attention mask** in data collators for packed sequences
-10. **Update references**: add arXiv:2409.02908, 2503.09573, 2504.12216, 2511.19269, 2602.22661
-
----
+torch>=2.6
+transformers>=4.40,<5.10
+accelerate>=0.28
+```
 
 ## Open Questions
 
-- Will LLaDA 2.0-flash (100B MoE) release open weights? Would be the best base model for adaptation.
-- Does diffu-GRPO work at <8B scale with limited compute?
-- Optimal block size for BD3LM across different hardware configurations?
-- Does CDLM distillation preserve reasoning quality or only benefit throughput tasks?
-
----
+1. **PyTorch 2.6+ bf16 autocast stability on MPS in practice** — merged Nov 2024 but limited community reports on training stability for large models. Test with a short run first.
+2. **Schedule-Free optimizer on MPS** — theoretically works (pure PyTorch) but no MPS-specific benchmarks found.
+3. **LoRA + Adafactor on MPS** — PEFT LoRA should work on MPS but the combination with Adafactor is undertested. If memory is critical, this could reduce trainable params by 10-100x.
+4. **macOS 26 (Tahoe) compatibility** — PyTorch MPS is currently broken on macOS 26 beta (issue #167679). Monitor before upgrading.
 
 ## Sources
 
-- [Mercury 2 Launch — Inception Labs](https://www.inceptionlabs.ai/blog/introducing-mercury-2)
-- [Mercury 2 — Artificial Analysis](https://artificialanalysis.ai/models/mercury-2)
-- [Mercury 1 Paper — arXiv:2506.17298](https://arxiv.org/abs/2506.17298)
-- [dLLM Unified Framework — arXiv:2602.22661](https://arxiv.org/abs/2602.22661)
-- [ZHZisZZ/dllm GitHub](https://github.com/ZHZisZZ/dllm)
-- [Time-Agnostic MDMs / First-Hitting Sampler — arXiv:2409.02908](https://arxiv.org/abs/2409.02908)
-- [BD3LM Block Diffusion — arXiv:2503.09573](https://arxiv.org/abs/2503.09573)
-- [kuleshov-group/bd3lms GitHub](https://github.com/kuleshov-group/bd3lms)
-- [Fast-dLLM — arXiv:2505.22618](https://arxiv.org/abs/2505.22618)
-- [NVlabs/Fast-dLLM GitHub](https://github.com/NVlabs/Fast-dLLM)
-- [d1 diffu-GRPO — arXiv:2504.12216](https://arxiv.org/abs/2504.12216)
-- [CDLM Distillation — arXiv:2511.19269](https://arxiv.org/pdf/2511.19269)
-- [Dream 7B — arXiv:2508.15487](https://arxiv.org/html/2508.15487v1)
-- [LLaDA — arXiv:2502.09992](https://arxiv.org/abs/2502.09992)
-- [MMaDA — arXiv:2505.15809](https://arxiv.org/abs/2505.15809)
-- [MDLM — arXiv:2406.07524](https://arxiv.org/abs/2406.07524)
+- [bitsandbytes Apple Silicon support — Issue #252](https://github.com/bitsandbytes-foundation/bitsandbytes/issues/252)
+- [bitsandbytes multi-backend discussion — Discussion #1340](https://github.com/bitsandbytes-foundation/bitsandbytes/discussions/1340)
+- [PyTorch MPS bf16 autocast — Issue #139386](https://github.com/pytorch/pytorch/issues/139386)
+- [PyTorch MPS bf16 autocast PR — PR #139390](https://github.com/pytorch/pytorch/pull/139390)
+- [PyTorch MPS fp16 autocast — PR #99272](https://github.com/pytorch/pytorch/pull/99272)
+- [PyTorch MPS backend documentation](https://docs.pytorch.org/docs/stable/notes/mps.html)
+- [PyTorch MPS environment variables](https://docs.pytorch.org/docs/stable/mps_environment_variables.html)
+- [HuggingFace Apple Silicon training docs](https://huggingface.co/docs/transformers/en/perf_train_special)
+- [HuggingFace Accelerate MPS guide](https://huggingface.co/docs/accelerate/en/usage_guides/mps)
+- [HuggingFace Optimizers documentation](https://huggingface.co/docs/transformers/en/optimizers)
+- [State of PyTorch Hardware Acceleration 2025](https://tunguz.github.io/PyTorch_Hardware_2025/)
+- [Profiling Apple Silicon Performance for ML Training (arXiv:2501.14925)](https://arxiv.org/pdf/2501.14925)
+- [MPS addcmul_ bug — blog post](https://elanapearl.github.io/blog/2025/the-bug-that-taught-me-pytorch/)
+- [PyTorch MPS broken on macOS 26 — Issue #167679](https://github.com/pytorch/pytorch/issues/167679)
+- [MPS SDPA memory issues — Medium](https://medium.com/@rakshekaraj/optimizing-pytorch-mps-attention-memory-efficient-large-sequence-processing-without-accuracy-5239f565f07b)
+- [mps-bitsandbytes PyPI](https://www.piwheels.org/project/mps-bitsandbytes/)
+- [bitsandbytes v0.45.2 installation guide](https://huggingface.co/docs/bitsandbytes/v0.45.2/installation)

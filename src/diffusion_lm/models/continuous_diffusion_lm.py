@@ -138,12 +138,15 @@ class ContinuousDiffusionLM(nn.Module):
 
         # Bidirectional denoising via transformer
         # We replace input embeddings with our noisy projected embeddings
-        # by using inputs_embeds instead of input_ids
+        # by using inputs_embeds instead of input_ids.
+        # Use output_hidden_states=True because CausalLM returns logits, not
+        # hidden states. We need the last hidden state for embedding prediction.
         transformer_outputs = self.backbone.transformer(
             inputs_embeds=x_t_proj,
             attention_mask=attention_mask,
+            output_hidden_states=True,
         )
-        hidden_states = transformer_outputs.last_hidden_state  # (B, L, D)
+        hidden_states = transformer_outputs.hidden_states[-1]  # (B, L, D)
 
         # Predict clean embeddings
         predicted_x0 = hidden_states  # (B, L, D)

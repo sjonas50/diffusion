@@ -21,15 +21,18 @@ class ELBOPerplexity:
     Args:
         num_timestep_samples: MC samples per batch for timestep integration.
         batch_size: Evaluation batch size.
+        pad_token_id: Token ID used for padding (to exclude from token count).
     """
 
     def __init__(
         self,
         num_timestep_samples: int = 32,
         batch_size: int = 8,
+        pad_token_id: int = 0,
     ) -> None:
         self.num_timestep_samples = num_timestep_samples
         self.batch_size = batch_size
+        self.pad_token_id = pad_token_id
 
     def compute(
         self,
@@ -73,8 +76,8 @@ class ELBOPerplexity:
                         batch_nll += loss.item()
 
                 avg_nll = batch_nll / self.num_timestep_samples
-                # Approximate tokens evaluated: non-pad tokens
-                n_tokens = (input_ids > 0).sum().item()
+                # Count non-pad tokens (works regardless of pad_token_id value)
+                n_tokens = (input_ids != self.pad_token_id).sum().item()
                 total_nll += avg_nll * n_tokens
                 total_tokens += n_tokens
 

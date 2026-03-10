@@ -28,6 +28,10 @@ class BidirectionalTransformer(nn.Module):
     Converts a standard causal (left-to-right) language model to bidirectional
     attention by injecting an explicit all-zeros 4D attention mask in forward().
 
+    For Flash Attention 2: 4D masks are not supported. Instead, we set
+    ``is_causal=False`` on all attention modules and pass only a 2D padding mask.
+    This matches the approach used by LLaDA and Dream.
+
     Supports AR-to-dLLM adaptation (recommended): start from a pretrained AR
     checkpoint (LLaMA-3, Qwen2.5, GPT-2, etc.) and fine-tune with the diffusion
     objective. Requires ~500x less compute than training from scratch.
@@ -39,6 +43,7 @@ class BidirectionalTransformer(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.model_config = config
+        self._use_fa2 = config.attn_implementation == "flash_attention_2"
 
         dtype = getattr(torch, config.dtype)
         hf_kwargs = {
@@ -60,6 +65,17 @@ class BidirectionalTransformer(nn.Module):
             )
             hf_config = AutoConfig.from_pretrained(config.model_name_or_path)
             self.transformer = AutoModelForCausalLM.from_config(hf_config, **hf_kwargs)
+
+        # FA2: set is_causal=False on all attention modules for bidirectional attention.
+        # FA2 does not support arbitrary 4D masks — this is the correct mechanism
+        # (matches LLaDA/Dream approach, validated by HF PR #39707).
+        if self._use_fa2:
+            n_patched = 0
+            for module in self.transformer.modules():
+                if hasattr(module, "is_causal"):
+                    module.is_causal = False
+                    n_patched += 1
+            logger.info(f"FA2 bidirectional: set is_causal=False on {n_patched} attention modules")
 
         if config.use_lora:
             self._apply_lora(config)
@@ -104,14 +120,32 @@ class BidirectionalTransformer(nn.Module):
             Logits, shape (B, L, V).
         """
         B, L = input_ids.shape
-        dtype = next(self.transformer.parameters()).dtype
         device = input_ids.device
 
-        if attention_mask is None or (attention_mask.dim() != 4):
-            # All-zeros 4D float mask: no masking = full bidirectional attention.
-            # In HF's attention implementation, a float mask of 0.0 means "attend"
-            # (it is added to the pre-softmax scores; 0 means no masking).
-            attention_mask = torch.zeros(B, 1, L, L, dtype=dtype, device=device)
+        if getattr(self, "_use_fa2", False):
+            # FA2: pass 2D padding mask directly (or None). is_causal=False is
+            # already set on attention modules in __init__. FA2 does not support
+            # arbitrary 4D masks — passing one would crash or silently break.
+            if attention_mask is not None and attention_mask.dim() == 4:
+                # 4D mask (e.g. block-diagonal) — not supported with FA2.
+                # Fall back to None (full attention). Packed sequences + FA2
+                # would need flash_attn_varlen_func, which is not yet supported.
+                logger.warning("4D attention mask ignored under FA2; using full attention")
+                attention_mask = None
+        else:
+            # eager/sdpa: build explicit 4D zeros mask for bidirectional attention.
+            if attention_mask is not None and attention_mask.dim() == 4:
+                # Already 4D (e.g. block-diagonal for packed sequences): use as-is
+                pass
+            else:
+                dtype = next(self.transformer.parameters()).dtype
+                mask_4d = torch.zeros(B, 1, L, L, dtype=dtype, device=device)
+                if attention_mask is not None and attention_mask.dim() == 2:
+                    # attention_mask: (B, L), 1=real, 0=padding
+                    # Expand to (B, 1, 1, L) so padding KEYS get -inf for all queries
+                    pad_mask = (1.0 - attention_mask.float()).unsqueeze(1).unsqueeze(2)
+                    mask_4d = mask_4d + pad_mask * torch.finfo(dtype).min
+                attention_mask = mask_4d
 
         outputs = self.transformer(
             input_ids=input_ids,

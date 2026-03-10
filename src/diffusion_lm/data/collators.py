@@ -91,8 +91,10 @@ class RandomTruncateCollator:
         }
 
         if self.pack_sequences:
-            lengths = [len(s) for s in sequences]
-            result["attention_mask"] = make_block_diagonal_mask(lengths, input_ids.shape[1])
+            current_len = input_ids.shape[1]
+            # Use truncated lengths (clamped to current sequence length)
+            lengths = [min(len(s), current_len) for s in sequences]
+            result["attention_mask"] = make_block_diagonal_mask(lengths, current_len)
 
         return result
 

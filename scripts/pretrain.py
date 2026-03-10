@@ -1,72 +1,115 @@
-"""Pretraining entry point for diffusion LMs."""
+"""Pretraining entry point for diffusion LMs.
+
+Usage:
+    uv run python scripts/pretrain.py \
+        --model_name_or_path gpt2 \
+        --dataset_name wikitext --dataset_config wikitext-2-raw-v1 \
+        --max_steps 1000 --output_dir ./checkpoints/pretrain
+
+Resume from checkpoint:
+    uv run python scripts/pretrain.py \
+        --model_name_or_path gpt2 \
+        --dataset_name wikitext --dataset_config wikitext-2-raw-v1 \
+        --max_steps 2000 --output_dir ./checkpoints/pretrain \
+        --resume_from_checkpoint ./checkpoints/pretrain/checkpoint-1000
+"""
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 
+import torch
 from loguru import logger
-from transformers import HfArgumentParser
+from transformers import AutoTokenizer, HfArgumentParser
 
+from diffusion_lm.config.diffusion import DiffusionConfig
 from diffusion_lm.config.model import ModelConfig
 from diffusion_lm.config.training import DiffusionTrainingArguments
+from diffusion_lm.data.collators import RandomTruncateCollator
+from diffusion_lm.models.masked_diffusion_lm import MaskedDiffusionLM
 from diffusion_lm.trainers.base import DiffusionTrainer
 
 
 @dataclass
 class PretrainScriptArgs:
-    """Extra CLI args for the pretrain script (not in TrainingArguments)."""
+    """CLI args for the pretrain script (beyond HF TrainingArguments)."""
 
-    model_name_or_path: str = field(default="gpt2", metadata={"help": "Base model."})
+    # Model
+    model_name_or_path: str = field(
+        default="gpt2", metadata={"help": "HF model name or local path."}
+    )
     process_type: str = field(default="masked", metadata={"help": "masked | block | continuous"})
-    schedule_type: str = field(
-        default="linear", metadata={"help": "linear | cosine | loglinear"}
-    )
-    block_size: int = field(default=512, metadata={"help": "Token block size for pretraining."})
+    schedule_type: str = field(default="linear", metadata={"help": "linear | cosine | loglinear"})
     dtype: str = field(
-        default="bfloat16", metadata={"help": "Model weight dtype: float32 | bfloat16 | float16."}
+        default="float32",
+        metadata={"help": "Model dtype: float32 | bfloat16 | float16."},
     )
-    # Dataset args
+    attn_implementation: str = field(
+        default="eager",
+        metadata={"help": "Attention backend: eager | sdpa | flash_attention_2."},
+    )
+    block_size: int = field(
+        default=512, metadata={"help": "Token block size for pretraining data."}
+    )
+    use_lora: bool = field(default=False, metadata={"help": "Enable LoRA adapters."})
+    lora_rank: int = field(default=16, metadata={"help": "LoRA rank."})
+
+    # Dataset
     dataset_name: str = field(
-        default="", metadata={"help": "HuggingFace dataset name (e.g. ashraq/financial-news-articles)."}  # noqa: E501
+        default="",
+        metadata={"help": "HF dataset name (e.g. ashraq/financial-news-articles)."},
     )
     dataset_config: str = field(default="", metadata={"help": "Dataset config/subset."})
     dataset_split: str = field(default="train", metadata={"help": "Dataset split."})
-    text_column: str = field(default="text", metadata={"help": "Column containing text."})
-    max_train_samples: int = field(
-        default=0, metadata={"help": "Cap training samples (0 = use all)."}
+    text_column: str = field(default="text", metadata={"help": "Text column name."})
+    max_train_samples: int = field(default=0, metadata={"help": "Cap training samples (0 = all)."})
+    streaming: bool = field(default=False, metadata={"help": "Stream dataset."})
+
+    # Resume
+    ignore_optimizer_on_resume: bool = field(
+        default=False,
+        metadata={
+            "help": "Delete optimizer/scheduler state from checkpoint before resuming. "
+            "Useful when switching optimizers (e.g. AdamW → Adafactor)."
+        },
     )
-    streaming: bool = field(default=False, metadata={"help": "Use streaming dataset."})
 
 
-def _build_dataset(args: PretrainScriptArgs, tokenizer):
-    """Load a HuggingFace dataset and tokenize into fixed-length blocks."""
-    import torch
+def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Dataset:
+    """Load HF dataset and tokenize into fixed-length blocks."""
     from torch.utils.data import Dataset
 
     from diffusion_lm.data.pretraining import tokenize_and_group
 
     if not args.dataset_name:
-        # Fallback: small synthetic dataset for smoke testing
-        logger.warning("No --dataset_name provided; using synthetic random data.")
+        logger.warning("No --dataset_name; using synthetic random data for smoke test.")
         vocab_size = tokenizer.vocab_size
 
         class _Synthetic(Dataset):
             def __init__(self):
-                import torch
                 self.data = torch.randint(1, vocab_size - 1, (256, args.block_size))
-            def __len__(self): return len(self.data)
-            def __getitem__(self, i): return {"input_ids": self.data[i]}
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, i):
+                return {"input_ids": self.data[i]}
 
         return _Synthetic()
 
     from datasets import load_dataset
 
     logger.info(f"Loading dataset: {args.dataset_name} split={args.dataset_split}")
-    ds_kwargs = {"streaming": args.streaming}
+    ds_kwargs: dict = {"streaming": args.streaming}
     if args.dataset_config:
-        ds = load_dataset(args.dataset_name, args.dataset_config,
-                          split=args.dataset_split, **ds_kwargs)
+        ds = load_dataset(
+            args.dataset_name,
+            args.dataset_config,
+            split=args.dataset_split,
+            **ds_kwargs,
+        )
     else:
         ds = load_dataset(args.dataset_name, split=args.dataset_split, **ds_kwargs)
 
@@ -75,18 +118,36 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer):
         logger.info(f"Capped to {len(ds)} samples")
 
     logger.info("Tokenizing and grouping into blocks...")
-    chunks = list(tokenize_and_group(
-        ds, tokenizer, block_size=args.block_size, text_column=args.text_column
-    ))
+    chunks = list(
+        tokenize_and_group(ds, tokenizer, block_size=args.block_size, text_column=args.text_column)
+    )
     logger.info(f"  {len(chunks):,} blocks of {args.block_size} tokens")
 
     class _ChunkDataset(Dataset):
-        def __init__(self, chunks):
-            self.chunks = [torch.tensor(c["input_ids"]) for c in chunks]
-        def __len__(self): return len(self.chunks)
-        def __getitem__(self, i): return {"input_ids": self.chunks[i]}
+        def __init__(self, data):
+            self.chunks = [torch.tensor(c["input_ids"]) for c in data]
+
+        def __len__(self):
+            return len(self.chunks)
+
+        def __getitem__(self, i):
+            return {"input_ids": self.chunks[i]}
 
     return _ChunkDataset(chunks)
+
+
+def _strip_optimizer_state(checkpoint_dir: str) -> None:
+    """Remove optimizer/scheduler state from a checkpoint directory.
+
+    This allows resuming training with the model weights intact but a fresh
+    optimizer — necessary when switching optimizers (e.g. AdamW → Adafactor).
+    """
+    for fname in ("optimizer.pt", "scheduler.pt"):
+        path = os.path.join(checkpoint_dir, fname)
+        if os.path.exists(path):
+            backup = path + ".bak"
+            os.rename(path, backup)
+            logger.info(f"Moved {fname} → {fname}.bak (fresh optimizer on resume)")
 
 
 def main() -> None:
@@ -98,43 +159,41 @@ def main() -> None:
 
     script_args, training_args = parser.parse_args_into_dataclasses()
 
-    from transformers import AutoTokenizer
+    # Handle optimizer state stripping before HF Trainer tries to load it
+    if script_args.ignore_optimizer_on_resume and training_args.resume_from_checkpoint:
+        _strip_optimizer_state(training_args.resume_from_checkpoint)
 
-    from diffusion_lm.config.diffusion import DiffusionConfig
-    from diffusion_lm.data.collators import RandomTruncateCollator
-    from diffusion_lm.models.backbone import BidirectionalTransformer, add_mask_token
-    from diffusion_lm.models.masked_diffusion_lm import MaskedDiffusionLM
-
-    model_config = ModelConfig(
-        model_name_or_path=script_args.model_name_or_path,
-        init_from_pretrained=True,
-        dtype=script_args.dtype,
-    )
-
+    # --- Tokenizer ---
     tokenizer = AutoTokenizer.from_pretrained(script_args.model_name_or_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    backbone = BidirectionalTransformer(model_config)
-    mask_token_id = add_mask_token(backbone, tokenizer)
-
+    # --- Model (single construction via from_configs) ---
+    model_config = ModelConfig(
+        model_name_or_path=script_args.model_name_or_path,
+        init_from_pretrained=True,
+        dtype=script_args.dtype,
+        attn_implementation=script_args.attn_implementation,
+        use_lora=script_args.use_lora,
+        lora_rank=script_args.lora_rank,
+    )
     diffusion_config = DiffusionConfig(
         process_type=script_args.process_type,
         schedule_type=script_args.schedule_type,
-        mask_token_id=mask_token_id,
     )
 
-    model = MaskedDiffusionLM(model_config, diffusion_config)
-    model.backbone = backbone
+    model = MaskedDiffusionLM.from_configs(model_config, diffusion_config, tokenizer)
 
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(
-        f"Model: {script_args.model_name_or_path} | {n_params:,} params"
-        f" | mask_token_id={mask_token_id}"
+        f"Model: {script_args.model_name_or_path} | {n_params:,} params | "
+        f"mask_token_id={model.diffusion.mask_token_id}"
     )
 
+    # --- Dataset ---
     train_dataset = _build_dataset(script_args, tokenizer)
 
+    # --- Trainer ---
     trainer = DiffusionTrainer(
         model=model,
         args=training_args,
@@ -142,7 +201,12 @@ def main() -> None:
         data_collator=RandomTruncateCollator(pad_token_id=tokenizer.pad_token_id),
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+
+    # Save final model + tokenizer
+    trainer.save_model()
+    tokenizer.save_pretrained(training_args.output_dir)
+    logger.info(f"Saved model and tokenizer to {training_args.output_dir}")
 
 
 if __name__ == "__main__":

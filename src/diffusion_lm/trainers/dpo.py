@@ -33,7 +33,6 @@ class DiffusionDPOTrainer(DiffusionTrainer):
         ref_model: Frozen reference model (SFT checkpoint). If None, uses a
             copy of the policy model (not recommended — use explicit ref).
         cpu_offload_ref: Move reference model to CPU between forward passes.
-            Saves GPU memory at cost of transfer overhead.
         n_mc_samples: Number of Monte Carlo samples for ELBO estimation.
         beta: DPO temperature (higher = closer to reference policy).
     """
@@ -59,25 +58,25 @@ class DiffusionDPOTrainer(DiffusionTrainer):
             self.ref_model.cpu()
             logger.info("Reference model offloaded to CPU.")
 
-    @torch.no_grad()
     def _estimate_log_prob(
         self,
         model,
         input_ids: Tensor,
         prompt_mask: Tensor | None,
         shared_u: float,
+        no_grad: bool = False,
     ) -> Tensor:
         """Estimate log p(response | prompt) via ELBO Monte Carlo averaging.
 
         Uses antithetic timestep sampling with a shared base sample `u` so that
-        policy and reference model estimates share the same timesteps — this
-        reduces variance of their difference (the key quantity for DPO).
+        policy and reference model estimates share the same timesteps.
 
         Args:
             model: Model to estimate log-prob for.
             input_ids: Token IDs, shape (B, L).
             prompt_mask: Boolean mask, True at prompt positions.
             shared_u: Shared base for antithetic sampling (same for policy and ref).
+            no_grad: If True, run under torch.no_grad() (for reference model).
 
         Returns:
             Estimated log-prob per sample, shape (B,) — approximately -ELBO.
@@ -86,15 +85,16 @@ class DiffusionDPOTrainer(DiffusionTrainer):
         device = input_ids.device
         total_loss = torch.zeros(B, device=device)
 
-        for _ in range(self.n_mc_samples):
-            # Antithetic timestep sampling with shared u
-            indices = torch.arange(B, device=device, dtype=torch.float32)
-            t = ((shared_u + indices / B) % 1.0).float()
-            # Scale to [time_epsilon, 1)
-            t = t * (1.0 - 1e-3) + 1e-3
+        ctx = torch.no_grad() if no_grad else torch.enable_grad()
+        with ctx:
+            for _ in range(self.n_mc_samples):
+                # Antithetic timestep sampling with shared u
+                indices = torch.arange(B, device=device, dtype=torch.float32)
+                t = ((shared_u + indices / B) % 1.0).float()
+                t = t * (1.0 - 1e-3) + 1e-3
 
-            outputs = model(input_ids=input_ids, prompt_mask=prompt_mask)
-            total_loss = total_loss + outputs["loss"]
+                outputs = model(input_ids=input_ids, prompt_mask=prompt_mask, t=t)
+                total_loss = total_loss + outputs["loss"]
 
         # log p ≈ -mean_loss (ELBO)
         return -(total_loss / self.n_mc_samples)
@@ -124,7 +124,7 @@ class DiffusionDPOTrainer(DiffusionTrainer):
         # Shared base for antithetic sampling (reduces variance of policy - ref difference)
         shared_u = torch.rand(1).item()
 
-        # Policy model estimates
+        # Policy model estimates (WITH gradient)
         pi_chosen = self._estimate_log_prob(model, chosen_ids, prompt_mask, shared_u)
         pi_rejected = self._estimate_log_prob(model, rejected_ids, prompt_mask, shared_u)
 
@@ -133,9 +133,12 @@ class DiffusionDPOTrainer(DiffusionTrainer):
         if self.cpu_offload_ref and self.ref_model is not None:
             self.ref_model.to(device)
 
-        with torch.no_grad():
-            ref_chosen = self._estimate_log_prob(ref_model, chosen_ids, prompt_mask, shared_u)
-            ref_rejected = self._estimate_log_prob(ref_model, rejected_ids, prompt_mask, shared_u)
+        ref_chosen = self._estimate_log_prob(
+            ref_model, chosen_ids, prompt_mask, shared_u, no_grad=True
+        )
+        ref_rejected = self._estimate_log_prob(
+            ref_model, rejected_ids, prompt_mask, shared_u, no_grad=True
+        )
 
         if self.cpu_offload_ref and self.ref_model is not None:
             self.ref_model.cpu()
@@ -144,7 +147,6 @@ class DiffusionDPOTrainer(DiffusionTrainer):
         advantages = (pi_chosen - ref_chosen) - (pi_rejected - ref_rejected)
         loss = -F.logsigmoid(self.beta * advantages).mean()
 
-        # Log reward margin for monitoring
         reward_margin = (pi_chosen - ref_chosen - (pi_rejected - ref_rejected)).mean().item()
         logger.debug(f"DPO reward margin: {reward_margin:.4f}, loss: {loss.item():.4f}")
 

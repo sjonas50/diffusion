@@ -18,11 +18,12 @@ class BlockDiffusionProcess(DiffusionProcess):
     """BD3LM block diffusion process.
 
     The sequence is divided into non-overlapping blocks of size `block_size`.
-    - Autoregressive across blocks: block i attends to all of blocks 0..i-1 (clean).
-    - Masked diffusion within each block: tokens in block i are corrupted independently.
+    - Autoregressive across blocks: earlier blocks are kept clean (fully visible).
+    - Masked diffusion within the current block: tokens corrupted independently.
 
-    This enables KV caching for completed blocks at inference (13% perplexity improvement
-    over standard masked diffusion per the BD3LM paper).
+    During training, a random block index is chosen per sample. All blocks
+    before it are clean context; the selected block is masked with probability
+    p_mask(t); blocks after it are fully masked.
 
     Args:
         schedule: Noise schedule for within-block masking.
@@ -63,8 +64,12 @@ class BlockDiffusionProcess(DiffusionProcess):
     ) -> tuple[Tensor, Tensor]:
         """Apply block-structured forward masking.
 
-        Each block is independently masked using the same per-sample timestep t.
-        Tokens outside (before) the current generation block are kept clean.
+        For each sample in the batch:
+        1. Divide the sequence into blocks.
+        2. Randomly select one block as the "active" block.
+        3. Blocks before the active block: kept clean (AR context).
+        4. Active block: masked with probability p_mask(t).
+        5. Blocks after the active block: fully masked.
 
         Args:
             x0: Clean token IDs, shape (B, L).
@@ -75,9 +80,42 @@ class BlockDiffusionProcess(DiffusionProcess):
             token_mask: Boolean mask of masked positions, shape (B, L).
         """
         B, L = x0.shape
-        p_mask = self.schedule.mask_probability(t).unsqueeze(-1).expand(B, L)
-        token_mask = torch.rand_like(p_mask) < p_mask
-        corrupted = torch.where(token_mask, torch.full_like(x0, self.mask_token_id), x0)
+        boundaries = self._get_block_boundaries(L)
+        n_blocks = len(boundaries)
+
+        corrupted = x0.clone()
+        token_mask = torch.zeros(B, L, dtype=torch.bool, device=x0.device)
+
+        # Per-sample masking probability
+        p_mask = self.schedule.mask_probability(t)  # (B,)
+
+        # Randomly select active block per sample
+        active_block = torch.randint(0, n_blocks, (B,), device=x0.device)
+
+        for block_idx, (start, end) in enumerate(boundaries):
+            block_len = end - start
+
+            for b in range(B):
+                if block_idx < active_block[b]:
+                    # Before active block: clean (AR context)
+                    pass
+                elif block_idx == active_block[b]:
+                    # Active block: mask with probability p_mask(t)
+                    mask_probs = torch.full(
+                        (block_len,), p_mask[b].item(), device=x0.device
+                    )
+                    block_mask = torch.rand(block_len, device=x0.device) < mask_probs
+                    token_mask[b, start:end] = block_mask
+                    corrupted[b, start:end] = torch.where(
+                        block_mask,
+                        torch.full_like(x0[b, start:end], self.mask_token_id),
+                        x0[b, start:end],
+                    )
+                else:
+                    # After active block: fully masked
+                    token_mask[b, start:end] = True
+                    corrupted[b, start:end] = self.mask_token_id
+
         return corrupted, token_mask
 
     def compute_loss(
@@ -88,7 +126,9 @@ class BlockDiffusionProcess(DiffusionProcess):
         t: Tensor,
         loss_mask: Tensor | None = None,
     ) -> Tensor:
-        """ELBO-weighted CE loss over masked positions (same as MaskedDiffusionProcess).
+        """ELBO-weighted CE loss over masked positions.
+
+        Same as MaskedDiffusionProcess but applied to block-structured masking.
 
         Args:
             logits: Model output logits, shape (B, L, V).
@@ -106,8 +146,6 @@ class BlockDiffusionProcess(DiffusionProcess):
             masked_positions = masked_positions & loss_mask
 
         n_masked = masked_positions.sum().clamp(min=1)
-        if n_masked == 0:
-            return logits.sum() * 0.0
 
         ce = F.cross_entropy(
             logits.reshape(B * L, V),

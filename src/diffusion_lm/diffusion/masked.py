@@ -98,9 +98,10 @@ class MaskedDiffusionProcess(DiffusionProcess):
         if loss_mask is not None:
             masked_positions = masked_positions & loss_mask
 
-        n_masked = masked_positions.sum().clamp(min=1)
+        n_masked = masked_positions.sum()
         if n_masked == 0:
             return logits.sum() * 0.0  # differentiable zero
+        n_masked = n_masked.clamp(min=1)
 
         # Per-token cross-entropy, shape (B, L)
         ce = F.cross_entropy(
