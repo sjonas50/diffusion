@@ -185,7 +185,38 @@ The CE loss `logits.reshape(B*L, V)` dominates VRAM due to Qwen3's large vocab (
 | 16 | 2048 | 18.8 GB | ~40 GB | OK |
 | 32 | 2048 | 37.6 GB | ~80 GB | **OOM** |
 
-**Use batch_size=16 with block_size=2048** on A100-80GB. Do NOT use batch_size=32.
+**Use batch_size=16 with block_size=2048** on A100/H100-80GB. Do NOT use batch_size=32.
+
+Note: Even with chunked CE loss (computing CE in chunks of 4 samples), batch=32 OOMs because the
+backward pass needs gradients for the full logits tensor. Additionally, accelerate's `_convert_to_fp32`
+will attempt to convert any returned logits to fp32 — the training forward must NOT return logits
+in the output dict (use `get_logits()` for inference instead).
+
+### Multi-GPU Training (DDP)
+
+For 2+ GPU pods, use `torchrun` instead of `python3`. HF Trainer auto-detects DDP:
+
+```bash
+torchrun --nproc_per_node=2 scripts/pretrain.py \
+  --per_device_train_batch_size 16 \
+  --gradient_accumulation_steps 4 \
+  ...  # all other args same as single-GPU
+```
+
+Effective batch = `nproc * per_device_batch * grad_accum` (e.g., 2 × 16 × 4 = 128).
+
+**2x H100 validated config (March 2026):**
+
+| Parameter | Value |
+|-----------|-------|
+| GPUs | 2x NVIDIA H100 80GB HBM3 |
+| Speed | 4.67 s/step (vs 9.25 s/step on 1x H100) |
+| VRAM | ~52 GB / 80 GB per GPU |
+| GPU util | 100% on both |
+| Cost | $5.38/hr (~$35 total for 5000 steps) |
+| Scaling | ~2.0x linear speedup |
+
+No code changes needed — HF Trainer handles all gradient synchronization via DDP.
 
 ### Previous Training Run Issues (MPS, Pre-A100)
 
