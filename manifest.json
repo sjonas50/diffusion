@@ -1,0 +1,24 @@
+{
+  "id": "60b0475d254a42e69154cec450ca21fc",
+  "version": 1,
+  "created_at": "2026-03-10T02:22:34.424Z",
+  "finished_at": "2026-03-10T02:45:10.914Z",
+  "agent": {
+    "name": "claude-code",
+    "model": "claude-opus-4-6",
+    "version": "2.1.58"
+  },
+  "git_commits": [
+    "9518deae005e667bfdde5380d9c93851c41587e1"
+  ],
+  "token_usage": {
+    "input_tokens": 3913,
+    "output_tokens": 2716,
+    "cache_read_tokens": 6928315,
+    "cache_write_tokens": 446994,
+    "total_tokens": 7381938
+  },
+  "summary": "ok, first review the previous training run that we did and the settings we used",
+  "capture_mode": "import",
+  "source_hash": "b2364e5b2176414c1d49e535f16f3888ad71dca23ffbfed0f04540bf3d677c54"
+}
