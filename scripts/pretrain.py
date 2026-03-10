@@ -56,15 +56,24 @@ class PretrainScriptArgs:
     use_lora: bool = field(default=False, metadata={"help": "Enable LoRA adapters."})
     lora_rank: int = field(default=16, metadata={"help": "LoRA rank."})
 
-    # Dataset
+    # Dataset (comma-separated for multi-dataset, e.g. "ds1,ds2")
     dataset_name: str = field(
         default="",
-        metadata={"help": "HF dataset name (e.g. ashraq/financial-news-articles)."},
+        metadata={"help": "HF dataset name(s), comma-separated."},
     )
-    dataset_config: str = field(default="", metadata={"help": "Dataset config/subset."})
+    dataset_config: str = field(
+        default="",
+        metadata={"help": "Dataset config(s), comma-separated. Broadcast last value."},
+    )
     dataset_split: str = field(default="train", metadata={"help": "Dataset split."})
-    text_column: str = field(default="text", metadata={"help": "Text column name."})
-    max_train_samples: int = field(default=0, metadata={"help": "Cap training samples (0 = all)."})
+    text_column: str = field(
+        default="text",
+        metadata={"help": "Text column name(s), comma-separated. Broadcast last value."},
+    )
+    max_train_samples: str = field(
+        default="0",
+        metadata={"help": "Cap training samples per dataset, comma-separated (0 = all)."},
+    )
     streaming: bool = field(default=False, metadata={"help": "Stream dataset."})
 
     # Resume
@@ -77,8 +86,24 @@ class PretrainScriptArgs:
     )
 
 
+def _broadcast(lst: list[str], n: int, default: str) -> list[str]:
+    """Pad a list to length n by repeating the last value (or default)."""
+    if not lst or lst == [""]:
+        return [default] * n
+    while len(lst) < n:
+        lst.append(lst[-1])
+    return lst
+
+
 def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Dataset:
-    """Load HF dataset and tokenize into fixed-length blocks."""
+    """Load one or more HF datasets and tokenize into fixed-length blocks.
+
+    Supports comma-separated --dataset_name for multi-dataset training.
+    Datasets are tokenized sequentially and concatenated; HF Trainer shuffles
+    at the batch level so domains get mixed during training.
+    """
+    from itertools import chain
+
     from torch.utils.data import Dataset
 
     from diffusion_lm.data.pretraining import tokenize_and_group
@@ -101,27 +126,52 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
 
     from datasets import load_dataset
 
-    logger.info(f"Loading dataset: {args.dataset_name} split={args.dataset_split}")
-    ds_kwargs: dict = {"streaming": args.streaming}
-    if args.dataset_config:
-        ds = load_dataset(
-            args.dataset_name,
-            args.dataset_config,
-            split=args.dataset_split,
-            **ds_kwargs,
-        )
-    else:
-        ds = load_dataset(args.dataset_name, split=args.dataset_split, **ds_kwargs)
+    # Parse comma-separated multi-dataset args
+    names = [s.strip() for s in args.dataset_name.split(",")]
+    configs = _broadcast(
+        [s.strip() for s in args.dataset_config.split(",")], len(names), ""
+    )
+    text_cols = _broadcast(
+        [s.strip() for s in args.text_column.split(",")], len(names), "text"
+    )
+    max_samples_list = _broadcast(
+        [s.strip() for s in args.max_train_samples.split(",")], len(names), "0"
+    )
 
-    if args.max_train_samples > 0 and not args.streaming:
-        ds = ds.select(range(min(args.max_train_samples, len(ds))))
-        logger.info(f"Capped to {len(ds)} samples")
+    # Build one tokenize_and_group generator per dataset, then chain
+    generators = []
+    ds_kwargs: dict = {"streaming": args.streaming}
+
+    for name, config, text_col, max_samp_str in zip(
+        names, configs, text_cols, max_samples_list
+    ):
+        max_samp = int(max_samp_str)
+        logger.info(
+            f"Loading dataset: {name} (config={config or 'none'}, "
+            f"text_col={text_col}, max_samples={max_samp or 'all'})"
+        )
+        if config:
+            ds = load_dataset(name, config, split=args.dataset_split, **ds_kwargs)
+        else:
+            ds = load_dataset(name, split=args.dataset_split, **ds_kwargs)
+
+        if max_samp > 0 and not args.streaming:
+            ds = ds.select(range(min(max_samp, len(ds))))
+            logger.info(f"  Capped to {len(ds)} samples")
+
+        generators.append(
+            tokenize_and_group(
+                ds, tokenizer, block_size=args.block_size, text_column=text_col
+            )
+        )
 
     logger.info("Tokenizing and grouping into blocks...")
-    chunks = list(
-        tokenize_and_group(ds, tokenizer, block_size=args.block_size, text_column=args.text_column)
+    chunks = list(chain(*generators))
+    total_tokens = len(chunks) * args.block_size
+    logger.info(
+        f"  {len(chunks):,} blocks of {args.block_size} tokens "
+        f"({total_tokens / 1e6:.0f}M tokens total)"
     )
-    logger.info(f"  {len(chunks):,} blocks of {args.block_size} tokens")
 
     class _ChunkDataset(Dataset):
         def __init__(self, data):
