@@ -85,11 +85,11 @@ def test_bidirectionality(model_id, needs_token):
     prompt_mask = torch.zeros(B, L, dtype=torch.bool)
 
     with torch.no_grad():
-        out1 = model(input_ids=x1, prompt_mask=prompt_mask)
-        out2 = model(input_ids=x2, prompt_mask=prompt_mask)
+        logits1_full = model.get_logits(x1)
+        logits2_full = model.get_logits(x2)
 
-    logits1 = out1["logits"][0, 3]
-    logits2 = out2["logits"][0, 3]
+    logits1 = logits1_full[0, 3]
+    logits2 = logits2_full[0, 3]
 
     assert not torch.allclose(logits1, logits2, atol=1e-4), (
         f"{model_id}: logits at pos 3 did NOT change when pos 5 changed — "

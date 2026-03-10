@@ -154,16 +154,16 @@ def test_masked_diffusion_lm_loss_scalar(masked_lm, diffusion_config):
 
 
 def test_masked_diffusion_lm_logits_shape(masked_lm, diffusion_config):
-    """Logits have correct shape (B, L, V)."""
+    """get_logits() returns correct shape (B, L, V)."""
     B, L = 2, 16
     safe_vocab = diffusion_config.mask_token_id
     input_ids = torch.randint(1, safe_vocab, (B, L))
 
     with torch.no_grad():
-        outputs = masked_lm(input_ids)
+        logits = masked_lm.get_logits(input_ids)
 
     actual_vocab = masked_lm.backbone.transformer.get_input_embeddings().weight.shape[0]
-    assert outputs["logits"].shape == (B, L, actual_vocab)
+    assert logits.shape == (B, L, actual_vocab)
 
 
 def test_prompt_mask_protection(masked_lm, diffusion_config):

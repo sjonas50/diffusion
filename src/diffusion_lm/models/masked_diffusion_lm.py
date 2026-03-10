@@ -150,7 +150,9 @@ class MaskedDiffusionLM(nn.Module):
                 antithetic sampling. Pass explicitly for DPO/GRPO shared timesteps.
 
         Returns:
-            Dict with "loss" (scalar) and "logits" (B, L, V).
+            Dict with "loss" (scalar). Logits are NOT returned during training
+            to avoid OOM from accelerate's fp32 conversion of the (B, L, V) tensor.
+            Use get_logits() for inference.
         """
         B = input_ids.shape[0]
         device = input_ids.device
@@ -173,4 +175,4 @@ class MaskedDiffusionLM(nn.Module):
         loss_mask = ~prompt_mask if prompt_mask is not None else None
         loss = self.diffusion.compute_loss(logits, input_ids, corrupted, t, loss_mask)
 
-        return {"loss": loss, "logits": logits}
+        return {"loss": loss}
