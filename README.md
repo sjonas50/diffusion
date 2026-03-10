@@ -40,7 +40,7 @@ uv sync
 Requires Python 3.11+. For Flash Attention 2 (recommended for GPU training):
 
 ```bash
-pip install flash-attn --no-build-isolation
+pip install flash-attn
 ```
 
 ## Quickstart
@@ -104,6 +104,31 @@ uv run python scripts/evaluate.py \
   --dataset_config wikitext-2-raw-v1 \
   --split test
 ```
+
+## GPU Training (RunPod / Cloud)
+
+For GPU training on RunPod or similar cloud providers, use Flash Attention 2 for best performance:
+
+```bash
+python3 scripts/pretrain.py \
+  --model_name_or_path Qwen/Qwen3-0.6B \
+  --process_type masked --schedule_type linear \
+  --block_size 512 --dtype bfloat16 \
+  --attn_implementation flash_attention_2 \
+  --dataset_name ashraq/financial-news-articles \
+  --text_column text --dataset_split train \
+  --output_dir ./checkpoints/finance-qwen3 \
+  --max_steps 2000 --per_device_train_batch_size 8 \
+  --gradient_accumulation_steps 4 --bf16 true \
+  --learning_rate 3e-5 --lr_scheduler_type cosine \
+  --warmup_steps 200 --weight_decay 0.1 \
+  --max_grad_norm 1.0 --logging_steps 25 \
+  --save_steps 500 --gradient_checkpointing true
+```
+
+**Attention backends:** `--attn_implementation` supports `eager` (CPU/MPS), `sdpa` (GPU, no flash-attn needed), and `flash_attention_2` (fastest, requires `pip install flash-attn`). FA2 enables bidirectional attention via `is_causal=False` on all attention modules.
+
+See [`docs/runpod-setup.md`](docs/runpod-setup.md) for detailed RunPod deployment guide including Docker image selection, SSH setup, and cost optimization.
 
 ## Finance Domain Example
 

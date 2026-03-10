@@ -163,11 +163,28 @@ def forward(self, input_ids, attention_mask=None, **kwargs):
 ```
 Verify bidirectionality: changing token at position 5 must change logits at position 3.
 
-### Flash Attention 2 — pass is_causal explicitly
+### Flash Attention 2 — bidirectional attention setup
+FA2 does NOT support arbitrary 4D attention masks. For bidirectional attention with FA2:
+1. Set `is_causal=False` on all attention modules in `__init__` (matches LLaDA/Dream approach)
+2. Pass only a 2D padding mask (or None) in forward — NOT a 4D mask
+3. If a 4D mask arrives (e.g. block-diagonal for packed seqs), log a warning and fall back to None
+
 ```python
-# FA2 requires explicit is_causal=False — do NOT rely on config propagation:
-flash_attn_func(q, k, v, causal=False)
+# In __init__: patch all attention modules
+if config.attn_implementation == "flash_attention_2":
+    for module in self.transformer.modules():
+        if hasattr(module, "is_causal"):
+            module.is_causal = False
+
+# In forward: FA2 path uses 2D mask only
+if self._use_fa2:
+    if attention_mask is not None and attention_mask.dim() == 4:
+        attention_mask = None  # 4D not supported with FA2
+else:
+    # eager/sdpa path: build explicit 4D zeros mask
+    attention_mask = torch.zeros(B, 1, L, L, dtype=dtype, device=device)
 ```
+**Validated:** FA2 + is_causal=False on 28 attention modules with Qwen3-0.6B on A100.
 
 ### Loss normalization
 ```python
@@ -244,7 +261,47 @@ LLaDA crashed at 1.2T/2.3T tokens without mitigation. Defaults:
 ### Transformers version pinning
 Pin `transformers<5.10` in `pyproject.toml`. The removal of `_update_causal_mask` in v5.10
 does not affect our explicit 4D mask approach, but other internal changes may. Bump only
-after explicit compatibility testing.
+after explicit compatibility testing. Validated with transformers 5.3.0 on A100.
+
+### Padding mask value
+Use `torch.finfo(dtype).min` for padding mask values, NOT hardcoded `-1e9`. The correct value
+depends on dtype (bf16 has different range than fp32). This prevents silent attention corruption.
+
+---
+
+## RunPod GPU Training
+
+See `docs/runpod-setup.md` for full setup guide. Key gotchas:
+
+1. **Docker image**: Use `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`. Many tags
+   that look valid don't exist.
+2. **DO NOT use `uv venv`** — it installs PyTorch from PyPI with wrong CUDA version. Use system
+   pip: `pip install -e ".[dev]"`
+3. **flash-attn**: Use `pip install flash-attn` (finds prebuilt wheels). `uv pip install` triggers
+   a 20-40 min source build.
+4. **SSH key**: Set via `PUBLIC_KEY` env var on pod creation.
+5. **Loss logging**: HF Trainer tqdm overwrites loss values in redirected logs. Check
+   `trainer_state.json` in checkpoints for loss history.
+
+### Validated A100 training command
+```bash
+python3 scripts/pretrain.py \
+  --model_name_or_path Qwen/Qwen3-0.6B \
+  --process_type masked --schedule_type linear \
+  --block_size 512 --dtype bfloat16 \
+  --attn_implementation flash_attention_2 \
+  --dataset_name ashraq/financial-news-articles \
+  --text_column text --dataset_split train \
+  --output_dir /workspace/checkpoints/finance-qwen3-a100 \
+  --max_steps 2000 --per_device_train_batch_size 8 \
+  --gradient_accumulation_steps 4 --bf16 true \
+  --learning_rate 3e-5 --lr_scheduler_type cosine \
+  --warmup_steps 200 --weight_decay 0.1 \
+  --max_grad_norm 1.0 --logging_steps 25 \
+  --save_steps 500 --save_total_limit 4 \
+  --report_to none --gradient_checkpointing true \
+  --dataloader_num_workers 4
+```
 
 ---
 
