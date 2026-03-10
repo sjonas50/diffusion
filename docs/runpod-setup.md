@@ -169,11 +169,23 @@ retry.
 ### Hyperparameter Rationale
 
 - **LR 3e-5**: From `docs/training-recipes.md` — recommended for 600M AR adaptation (20-40x lower than from-scratch)
-- **block_size 512**: Balance between context length and throughput. Previous 128 was too small.
-- **batch_size 8 x grad_accum 4**: Effective batch of 32 sequences = 16K tokens/step. Moderate.
-- **warmup 200**: Shorter than the 500-step recommendation since total training is only 2000 steps
+- **block_size 2048**: Matches Qwen3 pretrained context length. Use 512 for quick smoke tests.
+- **batch_size 16 x grad_accum 8**: Effective batch of 128 sequences = 262K tokens/step.
+- **warmup 500**: 10% of total steps (standard for adaptation)
 - **weight_decay 0.1**: Standard across all dLLM papers (LLaDA, d1)
 - **max_grad_norm 1.0**: Standard. Prevents NaN crashes from ELBO-weighted loss
+
+### VRAM Limits (Qwen3-0.6B, 151K vocab, A100-80GB)
+
+The CE loss `logits.reshape(B*L, V)` dominates VRAM due to Qwen3's large vocab (151,670):
+
+| batch | block_size | CE tensor | Total VRAM | Status |
+|-------|-----------|-----------|------------|--------|
+| 8 | 512 | 2.4 GB | ~14 GB | OK |
+| 16 | 2048 | 18.8 GB | ~40 GB | OK |
+| 32 | 2048 | 37.6 GB | ~80 GB | **OOM** |
+
+**Use batch_size=16 with block_size=2048** on A100-80GB. Do NOT use batch_size=32.
 
 ### Previous Training Run Issues (MPS, Pre-A100)
 

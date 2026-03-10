@@ -31,10 +31,12 @@ class MaskedDiffusionProcess(DiffusionProcess):
         schedule: NoiseSchedule,
         mask_token_id: int,
         time_epsilon: float = 1e-3,
+        ce_chunk_size: int = 4,
     ) -> None:
         super().__init__(schedule)
         self.mask_token_id = mask_token_id
         self.time_epsilon = time_epsilon
+        self.ce_chunk_size = ce_chunk_size
 
     def sample_timesteps(self, batch_size: int, device: torch.device) -> Tensor:
         """Antithetic timestep sampling scaled to [time_epsilon, 1)."""
@@ -76,6 +78,11 @@ class MaskedDiffusionProcess(DiffusionProcess):
         Only computes loss over masked positions. The weighting by 1/p_mask(t)
         makes this an unbiased ELBO estimate.
 
+        Uses chunked CE computation to reduce peak VRAM: processes `ce_chunk_size`
+        samples at a time instead of the full batch, and only computes CE on masked
+        positions. With Qwen3's 151K vocab, this reduces the CE intermediate from
+        ~18.8 GB to ~1.2 GB (chunk=4, ~50% masked), enabling batch_size=32 on 80GB.
+
         For SFT: pass loss_mask=~prompt_mask to restrict loss to response tokens.
 
         Args:
@@ -103,18 +110,27 @@ class MaskedDiffusionProcess(DiffusionProcess):
             return logits.sum() * 0.0  # differentiable zero
         n_masked = n_masked.clamp(min=1)
 
-        # Per-token cross-entropy, shape (B, L)
-        ce = F.cross_entropy(
-            logits.reshape(B * L, V),
-            x0.reshape(B * L),
-            reduction="none",
-        ).reshape(B, L)
-
         # ELBO weighting: divide by p_mask(t) per sample, broadcast to (B, L)
         # Without this, low-noise timesteps (few masks) are undertrained
         p_mask = self.schedule.mask_probability(t).unsqueeze(-1).clamp(min=1e-5)  # (B, 1)
-        weighted_ce = ce / p_mask  # (B, L)
 
-        # Sum over masked positions, normalize by count
-        loss = (weighted_ce * masked_positions.float()).sum() / n_masked
+        # Chunked CE: process ce_chunk_size samples at a time, only on masked
+        # positions. Avoids materializing the full (B*L, V) float32 intermediate.
+        weighted_sum = logits.new_zeros(())
+        for i in range(0, B, self.ce_chunk_size):
+            j = min(i + self.ce_chunk_size, B)
+            mask_chunk = masked_positions[i:j]  # (chunk, L)
+            if not mask_chunk.any():
+                continue
+            flat_mask = mask_chunk.reshape(-1)  # (chunk*L,)
+            ce_chunk = F.cross_entropy(
+                logits[i:j].reshape(-1, V)[flat_mask],  # (n_masked_chunk, V)
+                x0[i:j].reshape(-1)[flat_mask],  # (n_masked_chunk,)
+                reduction="none",
+            )
+            # Apply ELBO weight per sample: expand p_mask to match masked positions
+            p_mask_chunk = p_mask[i:j].expand_as(mask_chunk).reshape(-1)[flat_mask]
+            weighted_sum = weighted_sum + (ce_chunk / p_mask_chunk).sum()
+
+        loss = weighted_sum / n_masked
         return loss

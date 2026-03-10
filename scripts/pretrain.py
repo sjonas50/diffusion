@@ -174,6 +174,36 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
             )
         )
 
+    # Cache key: hash of dataset names + configs + block_size + max_samples
+    import hashlib
+
+    cache_key = hashlib.md5(
+        f"{args.dataset_name}|{args.dataset_config}|{args.block_size}"
+        f"|{args.max_train_samples}|{args.text_column}".encode()
+    ).hexdigest()[:12]
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+    cache_path = os.path.join(cache_dir, f"tokenized_{cache_key}.pt")
+
+    class _ChunkDataset(Dataset):
+        def __init__(self, tensors: list[Tensor]):
+            self.chunks = tensors
+
+        def __len__(self):
+            return len(self.chunks)
+
+        def __getitem__(self, i):
+            return {"input_ids": self.chunks[i]}
+
+    if os.path.exists(cache_path):
+        logger.info(f"Loading cached tokenized data from {cache_path}")
+        tensors = torch.load(cache_path, weights_only=True)
+        total_tokens = len(tensors) * args.block_size
+        logger.info(
+            f"  {len(tensors):,} blocks of {args.block_size} tokens "
+            f"({total_tokens / 1e6:.0f}M tokens total)"
+        )
+        return _ChunkDataset(tensors)
+
     logger.info("Tokenizing and grouping into blocks...")
     chunks = list(chain(*generators))
     total_tokens = len(chunks) * args.block_size
@@ -182,17 +212,14 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
         f"({total_tokens / 1e6:.0f}M tokens total)"
     )
 
-    class _ChunkDataset(Dataset):
-        def __init__(self, data):
-            self.chunks = [torch.tensor(c["input_ids"]) for c in data]
+    tensors = [torch.tensor(c["input_ids"]) for c in chunks]
 
-        def __len__(self):
-            return len(self.chunks)
+    # Save cache for future runs
+    os.makedirs(cache_dir, exist_ok=True)
+    torch.save(tensors, cache_path)
+    logger.info(f"Saved tokenized cache to {cache_path}")
 
-        def __getitem__(self, i):
-            return {"input_ids": self.chunks[i]}
-
-    return _ChunkDataset(chunks)
+    return _ChunkDataset(tensors)
 
 
 def _strip_optimizer_state(checkpoint_dir: str) -> None:

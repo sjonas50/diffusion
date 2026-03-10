@@ -71,19 +71,36 @@ class MaskedDiffusionLM(nn.Module):
     ) -> MaskedDiffusionLM:
         """Create model and optionally add mask token.
 
-        If tokenizer is provided and mask_token_id is -1, adds [MASK] token,
-        resizes the backbone embeddings, and reuses it (no double init).
+        If tokenizer is provided and mask_token_id is -1, adds [MASK] token
+        and resizes the backbone embeddings. Only creates the backbone once.
         """
-        resized_backbone = None
         if tokenizer is not None and diffusion_config.mask_token_id == -1:
-            resized_backbone = BidirectionalTransformer(model_config)
-            mask_token_id = add_mask_token(resized_backbone, tokenizer)
+            # Build backbone first, add mask token, then construct the model
+            # with the now-valid mask_token_id (avoids double backbone init)
+            backbone = BidirectionalTransformer(model_config)
+            mask_token_id = add_mask_token(backbone, tokenizer)
             diffusion_config.mask_token_id = mask_token_id
+            model = cls.__new__(cls)
+            nn.Module.__init__(model)
+            model.backbone = backbone
+            schedule = build_schedule(diffusion_config.schedule_type)
+            if diffusion_config.process_type == "block":
+                block_size = diffusion_config.block_size or 64
+                model.diffusion = BlockDiffusionProcess(
+                    schedule=schedule,
+                    mask_token_id=diffusion_config.mask_token_id,
+                    block_size=block_size,
+                    time_epsilon=diffusion_config.time_epsilon,
+                )
+            else:
+                model.diffusion = MaskedDiffusionProcess(
+                    schedule=schedule,
+                    mask_token_id=diffusion_config.mask_token_id,
+                    time_epsilon=diffusion_config.time_epsilon,
+                )
+            return model
 
-        model = cls(model_config, diffusion_config)
-        if resized_backbone is not None:
-            model.backbone = resized_backbone
-        return model
+        return cls(model_config, diffusion_config)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None) -> None:
         """Enable gradient checkpointing on the inner HF transformer."""
