@@ -140,24 +140,33 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
 
     # Build one tokenize_and_group generator per dataset, then chain
     generators = []
-    ds_kwargs: dict = {"streaming": args.streaming}
 
     for name, config, text_col, max_samp_str in zip(
         names, configs, text_cols, max_samples_list
     ):
         max_samp = int(max_samp_str)
+        # Use streaming when explicitly requested or when max_samples is set
+        # (avoids downloading entire dataset just to cap it)
+        use_streaming = args.streaming or max_samp > 0
         logger.info(
             f"Loading dataset: {name} (config={config or 'none'}, "
-            f"text_col={text_col}, max_samples={max_samp or 'all'})"
+            f"text_col={text_col}, max_samples={max_samp or 'all'}, "
+            f"streaming={use_streaming})"
         )
+        ds_kwargs: dict = {"streaming": use_streaming}
         if config:
             ds = load_dataset(name, config, split=args.dataset_split, **ds_kwargs)
         else:
             ds = load_dataset(name, split=args.dataset_split, **ds_kwargs)
 
-        if max_samp > 0 and not args.streaming:
-            ds = ds.select(range(min(max_samp, len(ds))))
-            logger.info(f"  Capped to {len(ds)} samples")
+        if max_samp > 0:
+            if use_streaming:
+                # IterableDataset: use .take() for capping
+                ds = ds.take(max_samp)
+                logger.info(f"  Capped to {max_samp} samples (streaming)")
+            else:
+                ds = ds.select(range(min(max_samp, len(ds))))
+                logger.info(f"  Capped to {len(ds)} samples")
 
         generators.append(
             tokenize_and_group(
