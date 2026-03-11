@@ -1,0 +1,24 @@
+{
+  "id": "e7151f4185124231a51295775800dc56",
+  "version": 1,
+  "created_at": "2026-03-10T02:22:34.424Z",
+  "finished_at": "2026-03-11T02:52:42.843Z",
+  "agent": {
+    "name": "claude-code",
+    "model": "claude-opus-4-6",
+    "version": "2.1.58"
+  },
+  "git_commits": [
+    "81cc07df145a1a979326775bb77a67db5eaa50ac"
+  ],
+  "token_usage": {
+    "input_tokens": 4692,
+    "output_tokens": 46809,
+    "cache_read_tokens": 76407712,
+    "cache_write_tokens": 2963639,
+    "total_tokens": 79422852
+  },
+  "summary": "The session involved setting up and executing a 2000-step diffusion language model training run on a RunPod A100 GPU, fixing Flash Attention 2 bidirectional attention implementation, and conducting three post-training evaluations to assess model quality.",
+  "capture_mode": "import",
+  "source_hash": "f6f6cd8876e2a9a5fabba348cceccc93a9f431b4b8c2c93116bb1f7a5ce50ffb"
+}
