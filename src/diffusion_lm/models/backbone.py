@@ -85,10 +85,24 @@ class BidirectionalTransformer(nn.Module):
         try:
             from peft import LoraConfig, get_peft_model
 
+            target_modules = config.lora_target_modules
+            if target_modules is None:
+                # Default: all attention + MLP projections (works for Qwen3, LLaMA, Mistral)
+                target_modules = [
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "gate_proj",
+                    "up_proj",
+                    "down_proj",
+                ]
+                logger.info(f"LoRA auto-detected target modules: {target_modules}")
+
             lora_config = LoraConfig(
                 r=config.lora_rank,
                 lora_alpha=config.lora_alpha,
-                target_modules=config.lora_target_modules,
+                target_modules=target_modules,
                 bias="none",
                 task_type="CAUSAL_LM",
             )
@@ -219,7 +233,6 @@ def assert_bidirectional(
     # Position 3 logits must change if attention is bidirectional
     diff = (logits_original[0, 3] - logits_modified[0, 3]).abs().max().item()
     assert diff > 1e-6, (
-        f"Bidirectional attention check FAILED (diff={diff:.2e}). "
-        "Causal mask may still be active."
+        f"Bidirectional attention check FAILED (diff={diff:.2e}). Causal mask may still be active."
     )
     logger.info(f"Bidirectional attention verified (max logit diff at pos 3: {diff:.4f})")

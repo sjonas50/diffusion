@@ -68,8 +68,9 @@ def _build_model(model_id: str):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES],
-                         ids=[i for i, _, _ in MODEL_CASES])
+@pytest.mark.parametrize(
+    "model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES], ids=[i for i, _, _ in MODEL_CASES]
+)
 def test_bidirectionality(model_id, needs_token):
     """Logits at position 3 change when token at position 5 changes."""
     pytest.importorskip("transformers")
@@ -81,8 +82,6 @@ def test_bidirectionality(model_id, needs_token):
     x1 = torch.randint(1, min(vocab_size - 2, 50000), (B, L))
     x2 = x1.clone()
     x2[0, 5] = (x2[0, 5] + 1) % (vocab_size - 2) + 1  # change token at pos 5
-
-    prompt_mask = torch.zeros(B, L, dtype=torch.bool)
 
     with torch.no_grad():
         logits1_full = model.get_logits(x1)
@@ -98,8 +97,9 @@ def test_bidirectionality(model_id, needs_token):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES],
-                         ids=[i for i, _, _ in MODEL_CASES])
+@pytest.mark.parametrize(
+    "model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES], ids=[i for i, _, _ in MODEL_CASES]
+)
 def test_forward_no_nan(model_id, needs_token):
     """Forward pass produces a finite, positive loss."""
     model, tokenizer = _build_model(model_id)
@@ -118,8 +118,9 @@ def test_forward_no_nan(model_id, needs_token):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES],
-                         ids=[i for i, _, _ in MODEL_CASES])
+@pytest.mark.parametrize(
+    "model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES], ids=[i for i, _, _ in MODEL_CASES]
+)
 def test_generation_no_mask_tokens_remain(model_id, needs_token):
     """FirstHittingSampler leaves no [MASK] tokens in the output."""
     from diffusion_lm.config.generation import GenerationConfig
@@ -138,15 +139,16 @@ def test_generation_no_mask_tokens_remain(model_id, needs_token):
     with torch.no_grad():
         out = sampler.generate(model, prompt, gen_config)
 
-    generated = out.sequences[:, prompt.shape[1]:]
+    generated = out.sequences[:, prompt.shape[1] :]
     assert not (generated == mask_token_id).any(), (
         f"{model_id}: MASK tokens remain in generated output"
     )
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES],
-                         ids=[i for i, _, _ in MODEL_CASES])
+@pytest.mark.parametrize(
+    "model_id,needs_token", [(m, t) for _, m, t in MODEL_CASES], ids=[i for i, _, _ in MODEL_CASES]
+)
 def test_mask_token_added(model_id, needs_token):
     """[MASK] token is added to tokenizer and embeddings are resized correctly."""
     from transformers import AutoTokenizer

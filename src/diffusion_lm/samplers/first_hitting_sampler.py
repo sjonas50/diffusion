@@ -14,6 +14,32 @@ if TYPE_CHECKING:
     from diffusion_lm.config.generation import GenerationConfig
 
 
+def _apply_top_p(probs: torch.Tensor, top_p: float) -> torch.Tensor:
+    """Apply nucleus (top-p) filtering to probability distributions.
+
+    Args:
+        probs: Probability distributions, shape (..., V).
+        top_p: Cumulative probability threshold. 1.0 = no filtering.
+
+    Returns:
+        Filtered probabilities (re-normalized), same shape.
+    """
+    if top_p >= 1.0:
+        return probs
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+    cumulative_probs = sorted_probs.cumsum(dim=-1)
+    # Remove tokens with cumulative probability above the threshold
+    # Shift right so the token that crosses the threshold is kept
+    sorted_mask = cumulative_probs - sorted_probs > top_p
+    sorted_probs[sorted_mask] = 0.0
+    # Scatter back to original order
+    probs = probs.clone()
+    probs.scatter_(-1, sorted_indices, sorted_probs)
+    # Re-normalize
+    probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    return probs
+
+
 class FirstHittingSampler(Sampler):
     """First-Hitting Sampler — the theoretically correct and fast default sampler.
 
@@ -24,10 +50,11 @@ class FirstHittingSampler(Sampler):
     Algorithm:
         1. Initialize: x = concat(prompt_ids, [MASK] * gen_len).
         2. Single forward pass → logits at masked positions (via model.get_logits).
-        3. Sample first-hitting time τ_i ~ Exp(rate=s_i) per masked token.
-        4. Unmask tokens in ascending τ_i order (most confident first).
-        5. Repeat for num_steps iterations.
-        6. Running Confidence Remasking (if enabled): allow re-masking low-confidence
+        3. Sample tokens from the conditional distribution (multinomial).
+        4. Use sampled confidence as first-hitting score to order unmasking.
+        5. Unmask top-k positions per step (most confident first).
+        6. Repeat for num_steps iterations.
+        7. Running Confidence Remasking (if enabled): allow re-masking low-confidence
            tokens to prevent Answer Backslide (9.8% MATH-500 failure rate without it).
     """
 
@@ -62,6 +89,7 @@ class FirstHittingSampler(Sampler):
         )  # (B, prompt_len + gen_len)
 
         num_steps = config.num_steps
+        top_p = getattr(config, "top_p", 1.0)
 
         for step in range(num_steps):
             with torch.no_grad():
@@ -78,6 +106,7 @@ class FirstHittingSampler(Sampler):
 
             # Work only on generation positions
             gen_logits = logits[:, prompt_len:, :]  # (B, gen_len, V)
+            V = gen_logits.shape[-1]
 
             # Exclude mask token from predictions (model must predict real tokens)
             gen_logits[:, :, mask_token_id] = -float("inf")
@@ -89,9 +118,17 @@ class FirstHittingSampler(Sampler):
             ):
                 gen_logits[:, :, eos_token_id] = -float("inf")
 
-            # Compute confidence scores (max softmax probability per position)
+            # Compute probabilities with temperature
             probs = torch.softmax(gen_logits / max(config.temperature, 1e-6), dim=-1)
-            confidence, predicted_ids = probs.max(dim=-1)  # (B, gen_len)
+
+            # Apply top-p nucleus filtering
+            probs = _apply_top_p(probs, top_p)
+
+            # Sample from the distribution (NOT argmax — argmax causes repetition)
+            flat_probs = probs.reshape(-1, V)  # (B*gen_len, V)
+            predicted_ids = torch.multinomial(flat_probs, num_samples=1).reshape(B, gen_len)
+            # Confidence = probability of the sampled token
+            confidence = probs.gather(-1, predicted_ids.unsqueeze(-1)).squeeze(-1)  # (B, gen_len)
 
             # Which positions are still masked?
             is_masked = x[:, prompt_len:] == mask_token_id  # (B, gen_len)
@@ -129,13 +166,16 @@ class FirstHittingSampler(Sampler):
                 low_conf = (rev_confidence < threshold) & revealed
                 x[:, prompt_len:][low_conf] = mask_token_id
 
-        # Ensure no mask tokens remain in output (fill with highest-confidence prediction)
+        # Ensure no mask tokens remain in output (fill with sampled prediction)
         final_is_masked = x[:, prompt_len:] == mask_token_id
         if final_is_masked.any():
             with torch.no_grad():
                 final_logits = model.get_logits(x)[:, prompt_len:, :]
             final_logits[:, :, mask_token_id] = -float("inf")
-            _, fill_ids = final_logits.max(dim=-1)
+            final_probs = torch.softmax(final_logits / max(config.temperature, 1e-6), dim=-1)
+            final_probs = _apply_top_p(final_probs, top_p)
+            flat_final = final_probs.reshape(-1, V)
+            fill_ids = torch.multinomial(flat_final, num_samples=1).reshape(B, gen_len)
             x[:, prompt_len:][final_is_masked] = fill_ids[final_is_masked]
 
         return SamplerOutput(sequences=x)

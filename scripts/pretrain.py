@@ -128,12 +128,8 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
 
     # Parse comma-separated multi-dataset args
     names = [s.strip() for s in args.dataset_name.split(",")]
-    configs = _broadcast(
-        [s.strip() for s in args.dataset_config.split(",")], len(names), ""
-    )
-    text_cols = _broadcast(
-        [s.strip() for s in args.text_column.split(",")], len(names), "text"
-    )
+    configs = _broadcast([s.strip() for s in args.dataset_config.split(",")], len(names), "")
+    text_cols = _broadcast([s.strip() for s in args.text_column.split(",")], len(names), "text")
     max_samples_list = _broadcast(
         [s.strip() for s in args.max_train_samples.split(",")], len(names), "0"
     )
@@ -142,7 +138,7 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
     generators = []
 
     for name, config, text_col, max_samp_str in zip(
-        names, configs, text_cols, max_samples_list
+        names, configs, text_cols, max_samples_list, strict=True
     ):
         max_samp = int(max_samp_str)
         # Use streaming when explicitly requested or when max_samples is set
@@ -169,9 +165,7 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
                 logger.info(f"  Capped to {len(ds)} samples")
 
         generators.append(
-            tokenize_and_group(
-                ds, tokenizer, block_size=args.block_size, text_column=text_col
-            )
+            tokenize_and_group(ds, tokenizer, block_size=args.block_size, text_column=text_col)
         )
 
     # Cache key: hash of dataset names + configs + block_size + max_samples
@@ -185,7 +179,7 @@ def _build_dataset(args: PretrainScriptArgs, tokenizer) -> torch.utils.data.Data
     cache_path = os.path.join(cache_dir, f"tokenized_{cache_key}.pt")
 
     class _ChunkDataset(Dataset):
-        def __init__(self, tensors: list[Tensor]):
+        def __init__(self, tensors: list[torch.Tensor]):
             self.chunks = tensors
 
         def __len__(self):

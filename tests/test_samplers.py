@@ -139,6 +139,48 @@ def test_running_confidence_remasking(tiny_lm, prompt_ids):
     assert torch.equal(out.sequences[:, :prompt_len], prompt_ids)
 
 
+def test_sampling_produces_diverse_output(tiny_lm, prompt_ids):
+    """Multinomial sampling should produce varied outputs across runs (not argmax)."""
+    sampler = FirstHittingSampler()
+    config = GenerationConfig(
+        max_new_tokens=8,
+        num_steps=4,
+        temperature=1.0,
+        top_p=1.0,
+        running_confidence_remasking=False,
+    )
+    # Generate multiple times with same prompt
+    outputs = []
+    for _ in range(5):
+        out = sampler.generate(tiny_lm, prompt_ids, config)
+        outputs.append(out.sequences[:, prompt_ids.shape[1] :])
+
+    # At least 2 out of 5 generations should differ (extremely unlikely to get
+    # 5 identical outputs with multinomial sampling over 8 positions)
+    n_unique = len({tuple(o[0].tolist()) for o in outputs})
+    assert n_unique >= 2, (
+        f"All {len(outputs)} generations produced identical output — "
+        "sampler may still be using argmax instead of multinomial"
+    )
+
+
+def test_top_p_filtering(tiny_lm, prompt_ids):
+    """Top-p filtering should not break generation."""
+    sampler = FirstHittingSampler()
+    config = GenerationConfig(
+        max_new_tokens=8,
+        num_steps=4,
+        temperature=1.0,
+        top_p=0.9,
+        running_confidence_remasking=False,
+    )
+    out = sampler.generate(tiny_lm, prompt_ids, config)
+    prompt_len = prompt_ids.shape[1]
+    generated = out.sequences[:, prompt_len:]
+    assert not (generated == MASK_TOKEN_ID).any(), "MASK tokens remain with top_p"
+    assert (out.sequences >= 0).all()
+
+
 # ---------------------------------------------------------------------------
 # BlockSampler tests
 # ---------------------------------------------------------------------------

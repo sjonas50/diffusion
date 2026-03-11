@@ -29,4 +29,10 @@ class ModelConfig:
     use_lora: bool = False
     lora_rank: int = 16
     lora_alpha: float = 32.0
-    lora_target_modules: list[str] | None = field(default=None)
+    lora_target_modules: list[str] | None = field(
+        default=None,
+        metadata={
+            "help": "LoRA target modules. None = auto-detect. "
+            "For Qwen3/LLaMA: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+        },
+    )

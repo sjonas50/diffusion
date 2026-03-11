@@ -26,6 +26,8 @@ class GenerationConfig:
             Free, no retraining required. Enabled by default.
         max_new_tokens: Maximum tokens to generate beyond the prompt.
         guidance_scale: Classifier-free guidance scale. 0.0 = no guidance.
+        top_p: Nucleus sampling threshold. Only tokens whose cumulative probability
+            mass is within the top_p fraction are kept. 1.0 = no filtering.
     """
 
     num_steps: int = 64
@@ -36,3 +38,4 @@ class GenerationConfig:
     running_confidence_remasking: bool = True
     max_new_tokens: int = 128
     guidance_scale: float = 0.0
+    top_p: float = 0.95
